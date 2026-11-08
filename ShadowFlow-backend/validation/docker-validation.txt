@@ -1,0 +1,15 @@
+Docker verification status: NOT RUN
+
+Attempted command:
+  docker compose -f docker/docker-compose.yml config --services
+
+Observed result:
+  /usr/bin/bash: line 1: docker: command not found
+  exit code 127
+
+Static fallback checks completed with Python YAML parsing:
+  shadowflow-api
+  shadowflow-node
+
+The Compose service set equals exactly {shadowflow-api, shadowflow-node}.
+No image build or 'docker compose up -d' claim is made on this machine.

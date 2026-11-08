@@ -1,0 +1,420 @@
+diff --git a/server/src/lib/__tests__/gateway-run.test.ts b/server/src/lib/__tests__/gateway-run.test.ts
+index 6337216..c992c3c 100644
+--- a/server/src/lib/__tests__/gateway-run.test.ts
++++ b/server/src/lib/__tests__/gateway-run.test.ts
+@@ -354,6 +354,129 @@ describe('emit → runBus 事件日志 → B2 读回', () => {
+     );
+     expect(hopPatches).toHaveLength(1);
+   });
++
++  // 2026-11-07 plan 卡任务行收口 — 崩溃/中断时行级 settle（plan_update_task）
++  // 从未发生，running 行回放永转圈（Loader2）。sweepOpenProcessCards 现补
++  // plan_update_task {status:'failed'} 终态。
++  it('finish 兜底清扫：未 settle 的 plan_card 任务行补 failed 终态', () => {
++    const groupId = 'g-sweep-plan-' + Date.now();
++    const gw = gatewayRun.startGatewayRun(groupId, '中断轮')!;
++    const planId = gw.nextId();
++    gw.emitMessage({
++      id: planId,
++      kind: 'plan_card',
++      turn_id: gw.turnId,
++      ts: Date.now() - 5_000,
++      title: '编排计划',
++      tasks: [
++        { id: 'node:a1', title: '甲', assignee: '小张', status: 'pending' },
++        { id: 'node:a2', title: '乙', assignee: '小李', status: 'pending' },
++      ],
++    });
++    gw.emitPatch({
++      id: planId,
++      op: 'plan_update_task',
++      task_id: 'node:a1',
++      patch: { status: 'running' },
++    });
++    // a2 从未派发（有意 pending）。
++
++    const before = timelineReplay.replayTimeline(
++      runSessions.getRunReplay(gw.sessionId)!.events,
++    );
++    const beforePlan = before.find((m) => m.id === planId)!;
++    if (beforePlan.kind === 'plan_card') {
++      expect(beforePlan.tasks.find((t) => t.id === 'node:a1')!.status).toBe('running');
++    }
++
++    gw.finish('canceled');
++
++    const replay = runSessions.getRunReplay(gw.sessionId)!;
++    const after = timelineReplay.replayTimeline(replay.events);
++    const plan = after.find((m) => m.id === planId)!;
++    expect(plan.kind).toBe('plan_card');
++    if (plan.kind === 'plan_card') {
++      expect(plan.tasks.find((t) => t.id === 'node:a1')).toMatchObject({
++        status: 'failed',
++        note: '回合中断，任务未结算',
++      });
++      expect(plan.tasks.find((t) => t.id === 'node:a2')).toMatchObject({ status: 'pending' });
++    }
++    // 合成补丁只发一条（a1 的 failed 终态）。
++    const swept = replay.events.filter(
++      (e) =>
++        e.event === 'message-patch' &&
++        (e.data as { id?: string }).id === planId &&
++        (e.data as { op?: string }).op === 'plan_update_task' &&
++        (e.data as { patch?: { status?: string } }).patch?.status === 'failed',
++    );
++    expect(swept).toHaveLength(1);
++  });
++
++  it('终态清扫不改写已结算的计划行（done/blocked 原样保留）', () => {
++    const groupId = 'g-sweep-plan-idem-' + Date.now();
++    const gw = gatewayRun.startGatewayRun(groupId, '正常轮')!;
++    const planId = gw.nextId();
++    gw.emitMessage({
++      id: planId,
++      kind: 'plan_card',
++      turn_id: gw.turnId,
++      ts: Date.now() - 1_000,
++      title: '编排计划',
++      tasks: [
++        { id: 'node:a1', title: '甲', status: 'pending' },
++        { id: 'node:a2', title: '乙', status: 'pending' },
++        { id: 'node:a3', title: '丙', status: 'pending' },
++      ],
++    });
++    gw.emitPatch({
++      id: planId,
++      op: 'plan_update_task',
++      task_id: 'node:a1',
++      patch: { status: 'running' },
++    });
++    gw.emitPatch({
++      id: planId,
++      op: 'plan_update_task',
++      task_id: 'node:a1',
++      patch: { status: 'done', elapsed_ms: 800 },
++    });
++    gw.emitPatch({
++      id: planId,
++      op: 'plan_update_task',
++      task_id: 'node:a2',
++      patch: { status: 'blocked' },
++    });
++    gw.emitPatch({
++      id: planId,
++      op: 'plan_update_task',
++      task_id: 'node:a3',
++      patch: { status: 'running' },
++    });
++    gw.finish('succeeded');
++
++    const replay = runSessions.getRunReplay(gw.sessionId)!;
++    const plan = timelineReplay.replayTimeline(replay.events).find((m) => m.id === planId)!;
++    if (plan.kind === 'plan_card') {
++      // 生产者的结算原样保留；只有 a3 的悬空行被收口。
++      expect(plan.tasks.find((t) => t.id === 'node:a1')).toMatchObject({
++        status: 'done',
++        elapsed_ms: 800,
++      });
++      expect(plan.tasks.find((t) => t.id === 'node:a2')).toMatchObject({ status: 'blocked' });
++      expect(plan.tasks.find((t) => t.id === 'node:a3')).toMatchObject({ status: 'failed' });
++    }
++    // a1/a2 无 failed 合成补丁；a3 恰一条。
++    const failedPatches = replay.events.filter(
++      (e) =>
++        e.event === 'message-patch' &&
++        (e.data as { id?: string }).id === planId &&
++        (e.data as { op?: string }).op === 'plan_update_task' &&
++        (e.data as { patch?: { status?: string } }).patch?.status === 'failed',
++    );
++    expect(failedPatches).toHaveLength(1);
++    expect((failedPatches[0]!.data as { task_id?: string }).task_id).toBe('node:a3');
++  });
+ });
+ 
+ describe('失败语义 — 绝不反向破坏聊天主链路', () => {
+diff --git a/server/src/lib/__tests__/run-event-bus-sweep.test.ts b/server/src/lib/__tests__/run-event-bus-sweep.test.ts
+index 28b9724..145c8b1 100644
+--- a/server/src/lib/__tests__/run-event-bus-sweep.test.ts
++++ b/server/src/lib/__tests__/run-event-bus-sweep.test.ts
+@@ -14,6 +14,11 @@
+  *   2. sweep 幂等 —— 清扫补丁只发一条，finish 二次调用不再追加；
+  *   3. hydrateOne 懒恢复（O4 路径）同款收口。
+  *
++ * 2026-11-07 DAG 每小时优化④ — plan 卡任务行收口：行级 settle（plan_update_task）
++ * 中断缺席时 running 行回放永转圈（Loader2）。sweep 现按行归并 message 初值 +
++ * 补丁取最终状态，仍 'running' 的行补 plan_update_task {status:'failed'}；
++ * done/failed/blocked 与 pending 行不动。覆盖同上三条路径。
++ *
+  * 纯 run-event-bus + timeline-replay，不碰 sqlite/cwd。
+  */
+ import { describe, it, expect } from 'vitest';
+@@ -171,3 +176,185 @@ describe('sweepOpenProcessCards — hop 卡收口', () => {
+     expect(bus.claimStart('s3')).toBe(false);
+   });
+ });
++
++/**
++ * 一段「进程被 kill 时留下的」计划卡日志：行级 settle（plan_update_task）
++ * 缺席/半途 —— 2026-11-07 DAG 每小时优化④（plan 卡任务行收口）。
++ */
++function planCrashLog(): RunEventRecord[] {
++  return [
++    {
++      id: 1,
++      event: 'message',
++      data: {
++        id: 'p1',
++        kind: 'plan_card',
++        turn_id: 'gwturn_y',
++        ts: 1_000,
++        title: '编排计划',
++        tasks: [
++          // 初值即 running（projector 路径），无任何补丁 → 收口。
++          { id: 'node:a1', title: '甲', status: 'running' },
++          // running→done 已结算 → 不动。
++          { id: 'node:a2', title: '乙', status: 'pending' },
++          // 从未派发 → pending 不动（有意不误标）。
++          { id: 'node:a3', title: '丙', status: 'pending' },
++          // 补丁 running 无终态 → 收口。
++          { id: 'node:a4', title: '丁', status: 'pending' },
++          // running 后 elapsed 补丁不带 status → 仍悬 → 收口。
++          { id: 'node:a5', title: '戊', status: 'pending' },
++        ],
++      },
++      ts: 1_000,
++    },
++    {
++      id: 2,
++      event: 'message-patch',
++      data: { id: 'p1', op: 'plan_update_task', task_id: 'node:a2', patch: { status: 'running' } },
++      ts: 1_200,
++    },
++    {
++      id: 3,
++      event: 'message-patch',
++      data: {
++        id: 'p1',
++        op: 'plan_update_task',
++        task_id: 'node:a2',
++        patch: { status: 'done', elapsed_ms: 800 },
++      },
++      ts: 1_800,
++    },
++    {
++      id: 4,
++      event: 'message-patch',
++      data: { id: 'p1', op: 'plan_update_task', task_id: 'node:a4', patch: { status: 'running' } },
++      ts: 1_300,
++    },
++    {
++      id: 5,
++      event: 'message-patch',
++      data: { id: 'p1', op: 'plan_update_task', task_id: 'node:a5', patch: { status: 'running' } },
++      ts: 1_400,
++    },
++    {
++      id: 6,
++      event: 'message-patch',
++      data: { id: 'p1', op: 'plan_update_task', task_id: 'node:a5', patch: { elapsed_ms: 1200 } },
++      ts: 1_500,
++    },
++  ];
++}
++
++function planCrashSnapshot(
++  id: string,
++  events: RunEventRecord[] = planCrashLog(),
++  nextEventId = 7,
++): RunSnapshot {
++  return {
++    id,
++    status: 'running',
++    events,
++    nextEventId,
++    exitCode: null,
++    signal: null,
++    createdAt: 1_000,
++    updatedAt: 2_800,
++  };
++}
++
++/** 统计某计划行收到的 plan_update_task 补丁（按终态 status 过滤可选）。 */
++function rowPatches(
++  events: RunEventRecord[],
++  cardId: string,
++  taskId: string,
++  status?: string,
++): RunEventRecord[] {
++  return events.filter((e) => {
++    if (e.event !== 'message-patch') return false;
++    const p = e.data as {
++      id?: string;
++      op?: string;
++      task_id?: string;
++      patch?: { status?: string };
++    };
++    return (
++      p.id === cardId &&
++      p.op === 'plan_update_task' &&
++      p.task_id === taskId &&
++      (status === undefined || p.patch?.status === status)
++    );
++  });
++}
++
++describe('sweepOpenProcessCards — plan 卡任务行收口', () => {
++  it('启动 hydration：running 行补 failed 终态，done/pending 行不动、elapsed 保留', () => {
++    const bus = createRunBus({ persist: makePersist([planCrashSnapshot('ps1')]) });
++    const run = bus.get('ps1')!;
++    expect(run.status).toBe('canceled');
++
++    const p1 = replayTimeline(run.events).find((m) => m.id === 'p1')!;
++    expect(p1.kind).toBe('plan_card');
++    if (p1.kind !== 'plan_card') return;
++    const byId = new Map(p1.tasks.map((t) => [t.id, t]));
++    // a1：message 初值即 running、无补丁 → 补 failed。
++    expect(byId.get('node:a1')).toMatchObject({
++      status: 'failed',
++      note: '回合中断，任务未结算',
++    });
++    // a2：生产者已结算 done/800 → 原样保留。
++    expect(byId.get('node:a2')).toMatchObject({ status: 'done', elapsed_ms: 800 });
++    // a3：从未派发 → pending 不动（有意不误标）。
++    expect(byId.get('node:a3')).toMatchObject({ status: 'pending' });
++    // a4：补丁 running 无终态 → 补 failed。
++    expect(byId.get('node:a4')).toMatchObject({ status: 'failed' });
++    // a5：running 后 elapsed 补丁不带 status 仍悬 → 补 failed，elapsed 保留。
++    expect(byId.get('node:a5')).toMatchObject({ status: 'failed', elapsed_ms: 1200 });
++
++    // 每个悬空行恰一条合成补丁；已结算/未派发行零补丁。
++    for (const tid of ['node:a1', 'node:a4', 'node:a5']) {
++      expect(rowPatches(run.events, 'p1', tid, 'failed')).toHaveLength(1);
++    }
++    expect(rowPatches(run.events, 'p1', 'node:a2', 'failed')).toHaveLength(0);
++    expect(rowPatches(run.events, 'p1', 'node:a3')).toHaveLength(0);
++  });
++
++  it('幂等：日志里已有清扫合成补丁的行不二次补，其余悬空行照收', () => {
++    // 模拟上一轮清扫已给 a1 补过 failed（合成补丁也在日志里）；a4/a5 仍悬空。
++    const events: RunEventRecord[] = [
++      ...planCrashLog(),
++      {
++        id: 7,
++        event: 'message-patch',
++        data: {
++          id: 'p1',
++          op: 'plan_update_task',
++          task_id: 'node:a1',
++          patch: { status: 'failed', note: '回合中断，任务未结算' },
++        },
++        ts: 1_900,
++      },
++    ];
++    const bus = createRunBus({ persist: makePersist([planCrashSnapshot('ps2', events, 8)]) });
++    const run = bus.get('ps2')!;
++    // a1 总共只有那一条 failed 补丁（清扫合成的也含在内）——没有第二条。
++    expect(rowPatches(run.events, 'p1', 'node:a1', 'failed')).toHaveLength(1);
++    // a4/a5 是悬空行，照收。
++    expect(rowPatches(run.events, 'p1', 'node:a4', 'failed')).toHaveLength(1);
++    expect(rowPatches(run.events, 'p1', 'node:a5', 'failed')).toHaveLength(1);
++  });
++
++  it('hydrateOne 懒恢复（O4）：同款任务行收口', () => {
++    const persist = makePersist([]);
++    persist.loadOneSync = (id) => (id === 'ps3' ? planCrashSnapshot('ps3') : undefined);
++    const bus = createRunBus({ persist });
++    const run = bus.hydrateOne('ps3')!;
++    expect(run.status).toBe('canceled');
++    const p1 = replayTimeline(run.events).find((m) => m.id === 'p1')!;
++    if (p1.kind === 'plan_card') {
++      const byId = new Map(p1.tasks.map((t) => [t.id, t]));
++      expect(byId.get('node:a1')).toMatchObject({ status: 'failed' });
++      expect(byId.get('node:a3')).toMatchObject({ status: 'pending' });
++    }
++    expect(rowPatches(run.events, 'p1', 'node:a1', 'failed')).toHaveLength(1);
++  });
++});
+diff --git a/server/src/lib/run-event-bus.ts b/server/src/lib/run-event-bus.ts
+index 8796dcc..a850134 100644
+--- a/server/src/lib/run-event-bus.ts
++++ b/server/src/lib/run-event-bus.ts
+@@ -256,15 +256,38 @@ export function createRunBus(opts: RunBusOptions = {}): RunBus {
+    * 2026-11-07 hop 卡收口 — hop_card 帧（pending/running）同样在此补
+    * hop_update {status:'aborted'} 终态：SQLite 侧有 sweepOrphanHops 兜底，
+    * 但重放可见的时间线侧此前无人收口，崩溃/中断后 hop 卡永卡「交接中」。
+-   * 幂等：已终态的卡直接跳过（含本清扫补过的 —— 合成 patch 也在日志里）。
++   * 2026-11-07 plan 卡任务行收口 — plan_card 的行级 settle（plan_update_task）
++   * 同样可能在中断时缺席，running 行在回放里永远转圈（Loader2）：按行归并
++   * message 初值 + 补丁取最终状态，仍 'running' 的行补
++   * plan_update_task {status:'failed'} 终态补丁。pending 行有意不动 ——
++   * 「待派发」如实反映从未开始，且正常收尾可能存在有意不派发的行，不误标。
++   * 幂等：已终态的卡直接跳过（含本清扫补过的 —— 合成 patch 也在日志里，
++   * 行级同理：合成 plan_update_task 归并后不再是 'running'，二次清扫不命中）。
+    */
+   const sweepOpenProcessCards = (run: Run): number => {
+     // 按消息 id 归并已见过的终态信号（append/中间帧不算）——后写的终态优先。
+     const finalized = new Set<string>();
++    // plan_card 行级最终状态：(卡 id, task id) → status（后写覆盖；无 status
++    // 的补丁如 elapsed_ms 不改行状态）。
++    const rowStatus = new Map<string, Map<string, string>>();
+     for (const rec of run.events) {
+       if (rec.event !== 'message-patch') continue;
+-      const p = rec.data as { id?: string; op?: string; patch?: { status?: string } } | null;
++      const p = rec.data as {
++        id?: string;
++        op?: string;
++        task_id?: string;
++        patch?: { status?: string };
++      } | null;
+       if (!p || typeof p.id !== 'string') continue;
++      if (p.op === 'plan_update_task' && typeof p.task_id === 'string') {
++        let byTask = rowStatus.get(p.id);
++        if (!byTask) {
++          byTask = new Map<string, string>();
++          rowStatus.set(p.id, byTask);
++        }
++        if (typeof p.patch?.status === 'string') byTask.set(p.task_id, p.patch.status);
++        continue;
++      }
+       if (
+         p.op === 'thinking_finalize' ||
+         p.op === 'tool_finalize' ||
+@@ -282,6 +305,7 @@ export function createRunBus(opts: RunBusOptions = {}): RunBus {
+         kind?: string;
+         status?: string;
+         ts?: number;
++        tasks?: Array<{ id?: string; status?: string }>;
+       } | null;
+       if (!m || typeof m.id !== 'string' || finalized.has(m.id)) continue;
+       if (m.kind === 'thinking' && m.status === 'streaming') {
+@@ -340,6 +364,30 @@ export function createRunBus(opts: RunBusOptions = {}): RunBus {
+         });
+         finalized.add(m.id);
+         swept += 1;
++      } else if (m.kind === 'plan_card') {
++        // plan 卡任务行收口 — 崩溃/中断时行级 settle（plan_update_task）从未
++        // 发生，running 行回放永转圈（Loader2）。行最终状态 = message 初值 +
++        // 补丁归并（rowStatus 后写覆盖）；仅收 'running' 行 → failed。已结算
++        // 行（done/failed/blocked）与 pending 行不碰；合成补丁进日志后二次
++        // 清扫归并出 'failed' 不再命中，幂等。
++        const byTask = rowStatus.get(m.id);
++        for (const t of Array.isArray(m.tasks) ? m.tasks : []) {
++          if (!t || typeof t.id !== 'string') continue;
++          const status = byTask?.get(t.id) ?? t.status;
++          if (status !== 'running') continue;
++          run.events.push({
++            id: run.nextEventId++,
++            event: 'message-patch',
++            data: {
++              id: m.id,
++              op: 'plan_update_task',
++              task_id: t.id,
++              patch: { status: 'failed', note: '回合中断，任务未结算' },
++            },
++            ts: now(),
++          });
++          swept += 1;
++        }
+       }
+     }
+     return swept;

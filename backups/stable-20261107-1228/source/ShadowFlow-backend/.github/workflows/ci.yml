@@ -1,0 +1,121 @@
+# ShadowFlow backend CI: Python + Node tests, then both backend image builds.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+  OPENAI_API_KEY: ""
+  ANTHROPIC_API_KEY: ""
+
+jobs:
+  test-python:
+    name: test (Python backend)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: python -m pip install -e ".[server,dev]"
+
+      - name: pytest
+        run: python -m pytest -m "not requires_api_key" --tb=short
+
+  test-node:
+    name: typecheck + test (Node backend)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: TypeScript typecheck
+        run: npx tsc --noEmit
+
+      - name: Vitest
+        run: npx vitest run --maxWorkers=2
+
+  build-docker:
+    name: build (backend Docker images)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    needs: [test-python, test-node]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Python API image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile.api
+          push: false
+          tags: shadowflow-api:ci
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Build Node gateway image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./server
+          file: ./server/Dockerfile
+          push: false
+          tags: shadowflow-node:ci
+          cache-from: type=gha,scope=node
+          cache-to: type=gha,mode=max,scope=node
+
+  secret-scan:
+    name: secret-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve scan base ref
+        id: scan-base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "ref=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            echo "ref=$(git rev-parse --verify HEAD~1 2>/dev/null || git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: TruffleHog OSS
+        uses: trufflesecurity/trufflehog@v3.88.0
+        with:
+          path: ./
+          base: ${{ steps.scan-base.outputs.ref }}
+          head: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          extra_args: --only-verified

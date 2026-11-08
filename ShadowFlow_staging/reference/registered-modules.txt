@@ -1,0 +1,274 @@
+# OpenAPI paths
+/
+/agents/health
+/api/acp/sessions
+/api/acp/status
+/api/acp/task
+/api/agents
+/api/agents/registry
+/api/agents/registry/packs
+/api/agents/registry/packs/install
+/api/agents/registry/packs/installed
+/api/agents/registry/refresh
+/api/agents/registry/{agent_id}
+/api/agents/routing-log
+/api/agents/{agent_id}
+/api/agents/{agent_id}/chat
+/api/agents/{agent_id}/pause
+/api/agents/{agent_id}/resume
+/api/approvals/events
+/api/approvals/{approval_id}/approve
+/api/approvals/{approval_id}/reject
+/api/artifacts/{artifact_id}/pin
+/api/catalog/apps
+/api/catalog/apps/{app_id}
+/api/catalog/apps/{app_id}/fork
+/api/chat/completions
+/api/chat/dm/{agent_id}/resolve
+/api/groups
+/api/groups/{group_id}
+/api/groups/{group_id}/approvals/pending
+/api/groups/{group_id}/briefboard
+/api/groups/{group_id}/events
+/api/groups/{group_id}/messages
+/api/groups/{group_id}/messages/{message_id}/pin
+/api/groups/{group_id}/messages/{message_id}/reactions
+/api/groups/{group_id}/messages/{message_id}/thread
+/api/groups/{group_id}/user-settings
+/api/inbox
+/api/knowledge/packs
+/api/knowledge/packs/{pack_id}
+/api/knowledge/packs/{pack_id}/graph
+/api/knowledge/packs/{pack_id}/index
+/api/knowledge/packs/{pack_id}/query
+/api/knowledge/packs/{pack_id}/reindex
+/api/memory-bank/packs
+/api/memory-bank/packs/{pack_id}
+/api/memory-bank/packs/{pack_id}/blobs/{sha256}
+/api/memory-bank/packs/{pack_id}/files
+/api/memory-bank/packs/{pack_id}/query
+/api/memory-bank/packs/{pack_id}/sources
+/api/memory-bank/packs/{pack_id}/sources/{source_id}
+/api/memory-bank/packs/{pack_id}/text
+/api/memory/profiles
+/api/memory/profiles/{profile_id}
+/api/memory/state/{agent_id}
+/api/memory/stats
+/api/memory/writeback/{run_id}
+/api/messages/{message_id}/feedback
+/api/opc/approvals/{approval_id}/decide
+/api/opc/companies
+/api/opc/company
+/api/opc/company/{company_id}
+/api/opc/company/{company_id}/approvals
+/api/opc/company/{company_id}/departments
+/api/opc/company/{company_id}/employees
+/api/opc/company/{company_id}/employees/{employee_id}
+/api/opc/company/{company_id}/employees/{employee_id}/fire
+/api/opc/company/{company_id}/income
+/api/opc/company/{company_id}/org
+/api/opc/company/{company_id}/pnl
+/api/opc/company/{company_id}/projects
+/api/opc/company/{company_id}/roster
+/api/opc/models
+/api/opc/orders
+/api/opc/orders/{order_id}
+/api/opc/orders/{order_id}/cancel
+/api/opc/orders/{order_id}/events
+/api/opc/pay/info
+/api/opc/pay/notify
+/api/opc/products
+/api/opc/products/{product_id}
+/api/opc/projects/{project_id}
+/api/opc/projects/{project_id}/run
+/api/opc/seed
+/api/opc/tasks/{task_id}
+/api/opc/tasks/{task_id}/run
+/api/runs
+/api/runs/{run_id}/artifact-lineage
+/api/runs/{run_id}/checkpoint-lineage
+/api/runs/{run_id}/event-log
+/api/runs/{run_id}/graph
+/api/runs/{run_id}/loops
+/api/runs/{run_id}/loops/stream
+/api/runs/{run_id}/loops/{loop_id}/halt
+/api/runs/{run_id}/loops/{loop_id}/verdicts
+/api/runs/{run_id}/memory-graph
+/api/runs/{run_id}/task-tree
+/api/runs/{run_id}/training-dataset
+/api/schedules
+/api/schedules/{schedule_id}
+/api/schedules/{schedule_id}/runs
+/api/sessions/{session_id}/checkpoint
+/api/sessions/{session_id}/context
+/api/sessions/{session_id}/report
+/api/settings/agents/detect
+/api/settings/agents/selection
+/api/settings/appearance
+/api/settings/byok
+/api/settings/byok/models
+/api/settings/byok/{provider}
+/api/settings/connectors/composio
+/api/settings/media
+/api/settings/media/{provider_id}
+/api/settings/pets
+/api/settings/pets/sync
+/api/settings/pets/{pet_id}/spritesheet
+/api/teams
+/api/teams/{team_id}
+/api/teams/{team_id}/chat
+/api/teams/{team_id}/policy
+/api/teams/{team_id}/validation-hooks
+/api/teams/{team_id}/workflow
+/api/teams/{team_id}/workflow/branch
+/api/teams/{team_id}/workflow/restore
+/api/teams/{team_id}/workflow/versions
+/api/templates
+/api/templates/{template_id}/inbox
+/api/wallet/activity
+/api/wallet/skin-pack
+/api/wallet/status
+/api/workspaces
+/api/workspaces/{workspace_id}
+/approvals/pending
+/archive/runs
+/builder/blueprints/generate
+/builder/blueprints/instantiate
+/builder/blueprints/kit-regression
+/builder/blueprints/kit-smoke-run
+/builder/blueprints/publish
+/builder/blueprints/smoke-run
+/builder/blueprints/{blueprint_id}/import-agent
+/builder/kits
+/builder/kits/knowledge_assistant/instantiate
+/builder/kits/persona_npc/instantiate
+/builder/kits/research/instantiate
+/builder/kits/review_approval/instantiate
+/builder/kits/{kit_id}
+/builder/teams/from-agent
+/catalog/apps
+/catalog/apps/{app_id}
+/catalog/apps/{app_id}/fork
+/chat/sessions
+/chat/sessions/{session_id}
+/chat/sessions/{session_id}/messages
+/checkpoints/{checkpoint_id}
+/citations/{run_id}
+/citations/{run_id}/export
+/evals/profiles
+/evals/profiles/{profile_id}
+/evals/results/{result_id}
+/evals/run/{blueprint_id}
+/health
+/ops/kpi
+/policy/stats
+/providers/load
+/regression/{blueprint_id}/baselines
+/regression/{blueprint_id}/reports/{report_id}
+/regression/{blueprint_id}/run
+/runs
+/runs/{run_id}
+/runs/{run_id}/artifact-lineage
+/runs/{run_id}/checkpoint-lineage
+/runs/{run_id}/children
+/runs/{run_id}/event-log
+/runs/{run_id}/graph
+/runs/{run_id}/loops
+/runs/{run_id}/loops/stream
+/runs/{run_id}/loops/{loop_id}/halt
+/runs/{run_id}/loops/{loop_id}/verdicts
+/runs/{run_id}/memory-graph
+/runs/{run_id}/resume
+/runs/{run_id}/task-tree
+/runs/{run_id}/training-dataset
+/state/{agent_id}
+/state/{agent_id}/reset
+/state/{agent_id}/restore/{snapshot_id}
+/state/{agent_id}/snapshot
+/state/{agent_id}/snapshots
+/templates
+/templates/custom
+/templates/{template_id}
+/tools/builtin
+/tools/providers
+/tools/providers/{provider_id}
+/tools/providers/{provider_id}/test
+/tools/providers/{provider_id}/tools
+/workflow/compile
+/workflow/export/agentteams
+/workflow/export/sfagent
+/workflow/graph
+/workflow/run
+/workflow/runs/{run_id}
+/workflow/runs/{run_id}/approval
+/workflow/runs/{run_id}/events
+/workflow/runs/{run_id}/gap_response
+/workflow/runs/{run_id}/policy
+/workflow/runs/{run_id}/reconfigure
+/workflow/runs/{run_id}/resume
+/workflow/runs/{run_id}/trajectory/sanitize
+/workflow/sfagent/import
+/workflow/validate
+
+# shadowflow/server.py include_router
+app.include_router(_ops_api.router)
+app.include_router(_archive_api.router)
+app.include_router(_policy_obs_api.router)
+app.include_router(_inbox_api.router)
+app.include_router(_groups_api.router)
+app.include_router(_approvals_api.router)
+app.include_router(_builder_api.router)
+app.include_router(_catalog_api.router)
+app.include_router(_catalog_api.router, prefix="/api")
+app.include_router(_tools_api.router)
+app.include_router(_knowledge_api.router)
+app.include_router(_citations_api.router)
+app.include_router(_memory_api.router)
+app.include_router(_state_api.router)
+app.include_router(_evals_api.router)
+app.include_router(_registry_api.router)  # before agents to avoid /{agent_id} catch-all
+app.include_router(_agents_api.router)
+app.include_router(_teams_api.router)
+app.include_router(_acp_server_api.router)
+app.include_router(_sessions_api.router)
+app.include_router(_workspaces_api.router)
+app.include_router(_chat_api.router)
+app.include_router(_a2a_bridge_api.router)
+app.include_router(_regression_router)
+app.include_router(_schedules_api.router)
+app.include_router(_settings_api.router)
+app.include_router(_wallet_api.router)
+app.include_router(_runs_api.router)
+app.include_router(_artifacts_api.router)
+app.include_router(_opc_api.router)
+app.include_router(_create_memory_bank_router(memory_bank))
+
+# server/src/index.ts app.use
+app.use('/api/run-sessions', runSessionsRouter);
+app.use('/api/runs', runsRouter);
+app.use('/api/runs', runSuggestionsRouter);
+app.use('/api/agents', agentsRouter);
+app.use('/api/teams', teamsRouter);
+app.use('/api/skills', skillsRouter);
+app.use('/api/design-systems', designSystemsRouter);
+app.use('/api/export', exportRouter);
+app.use('/api/settings', settingsRouter);
+app.use('/api/cli', cliRouter);
+app.use('/api/clawhub', clawhubRouter);
+app.use('/api/acp', acpRouter);
+app.use('/api/artifacts', artifactsRouter);
+app.use('/api/auth', authRouter);
+app.use('/api/projects', projectsRouter);
+app.use('/api/projects', projectScopedConversationsRouter);
+app.use('/api/memory-entries', memoryEntriesRouter);
+app.use('/api/memory/lessons', memoryLessonsRouter);
+app.use('/api/memory/handoff', memoryHandoffRouter);
+app.use('/api/dashboard', dashboardRouter);
+app.use('/api/merchant', merchantBoardRouter);
+app.use('/api/conversations', conversationsRouter);
+app.use('/api/groups', groupsChatRouter);
+app.use('/api/groups', groupsNodeRouter);
+app.use('/api/fs', fsBrowseRouter);
+app.use('/api/knowledge-vaults', knowledgeVaultsRouter);
+app.use('/api/llm', llmRouter);
+app.use('/api', proxyFallback);

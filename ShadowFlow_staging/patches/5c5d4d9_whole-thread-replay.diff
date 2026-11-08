@@ -1,0 +1,587 @@
+diff --git a/server/src/lib/__tests__/turn-thread.test.ts b/server/src/lib/__tests__/turn-thread.test.ts
+new file mode 100644
+index 0000000..82da35a
+--- /dev/null
++++ b/server/src/lib/__tests__/turn-thread.test.ts
+@@ -0,0 +1,168 @@
++/**
++ * turn-thread.test.ts — Whole-thread 回放保真契约（2026-11-07）。
++ *
++ * 「thread 丢段即测试红」：一次 turn 的 (history, prompt) 必须覆盖持久化线程的
++ * 每个文本段恰好一次；除被提升为 prompt 的用户轮外任何消息都不得丢弃；history
++ * 折叠相邻同角色且不以 'user' 收尾（Anthropic 严格交替，两相邻同角色 → 422）。
++ *
++ * 回归背景：旧 `history.slice(0, -1)` 盲删末位——多 agent 串行轮末位是上一个
++ * agent 的回复，被整条删掉且用户消息与 prompt 重复。
++ */
++import { describe, it, expect } from 'vitest';
++import { buildTurnThread, foldConsecutiveRoles, textOf } from '../turn-thread';
++import type { ConversationMessage } from '../conversation-types';
++
++const u = (text: string): ConversationMessage => ({
++  role: 'user',
++  blocks: [{ kind: 'text', text }],
++});
++const a = (text: string): ConversationMessage => ({
++  role: 'assistant',
++  blocks: [{ kind: 'text', text }],
++});
++
++/** assembled 的文本段清单：history 各 text block + prompt（按 \n\n 可拆段）。 */
++function segmentList(t: { history: ConversationMessage[]; prompt: string }): string[] {
++  const out: string[] = [];
++  for (const m of t.history) for (const b of m.blocks) {
++    if (b.kind === 'text' && b.text) out.push(b.text);
++  }
++  if (t.prompt) out.push(...t.prompt.split('\n\n'));
++  return out;
++}
++
++/** 段多重集恰好覆盖期望集合（丢段/重复都红）。 */
++function expectSegmentsOnce(
++  t: { history: ConversationMessage[]; prompt: string },
++  expected: string[],
++): void {
++  expect(segmentList(t).slice().sort()).toEqual(expected.slice().sort());
++}
++
++describe('foldConsecutiveRoles', () => {
++  it('相邻同角色折叠为一条，blocks 原序拼接（段界保留）', () => {
++    const out = foldConsecutiveRoles([u('U1'), u('U2'), a('A1'), a('A2'), u('U3')]);
++    expect(out.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
++    expect(out[0]!.blocks.map((b) => (b.kind === 'text' ? b.text : ''))).toEqual(['U1', 'U2']);
++    expect(out[1]!.blocks.map((b) => (b.kind === 'text' ? b.text : ''))).toEqual(['A1', 'A2']);
++  });
++
++  it('不相邻同角色不合并；tool 角色同款折叠', () => {
++    const out = foldConsecutiveRoles([u('U1'), a('A1'), u('U2')]);
++    expect(out).toHaveLength(3);
++    const tools = foldConsecutiveRoles([
++      { role: 'tool', blocks: [{ kind: 'text', text: 'T1' }] },
++      { role: 'tool', blocks: [{ kind: 'text', text: 'T2' }] },
++    ]);
++    expect(tools).toHaveLength(1);
++    expect(tools[0]!.blocks).toHaveLength(2);
++  });
++
++  it('不改入参（新对象/新数组）', () => {
++    const input = [u('U1'), u('U2')];
++    const out = foldConsecutiveRoles(input);
++    expect(input).toHaveLength(2);
++    expect(out[0]).not.toBe(input[0]);
++  });
++});
++
++describe('buildTurnThread — 契约 1：保真（丢段/重复即红）', () => {
++  it('常规交替线程：五段各恰好一次，与旧 slice(0,-1) 行为一致', () => {
++    const t = buildTurnThread([u('U1'), a('A1'), u('U2'), a('A2'), u('U3')], 'U3');
++    expect(t.prompt).toBe('U3');
++    expect(t.history.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
++    expectSegmentsOnce(t, ['U1', 'A1', 'U2', 'A2', 'U3']);
++  });
++
++  it('多 agent 串行轮回归：末位前序回复不丢、prompt 用户消息不重复', () => {
++    // 线程 [U, A1]：U 是被提升的用户消息，A1 是上一个 agent 的回复（旧
++    // slice(0,-1) 把 A1 整条删掉、U 留在 history 里与 prompt 重复）。
++    const t = buildTurnThread([u('U'), a('A1')], 'U');
++    expectSegmentsOnce(t, ['U', 'A1']);
++    expect(textOf(t.history[0]!)).toBe('A1');
++    expect(t.prompt).toBe('U');
++  });
++
++  it('多轮线程末位是回复时同样不丢', () => {
++    const t = buildTurnThread([u('U1'), a('A1'), u('U2'), a('A2'), a('A3')], 'U2');
++    expectSegmentsOnce(t, ['U1', 'A1', 'U2', 'A2', 'A3']);
++    expect(t.prompt).toBe('U2');
++  });
++
++  it('双连发：更早用户段并入 prompt 前缀，不丢不重复', () => {
++    const t = buildTurnThread([u('U1'), u('U2')], 'U2');
++    expect(t.history).toHaveLength(0);
++    expect(t.prompt).toBe('U1\n\nU2');
++    expectSegmentsOnce(t, ['U1', 'U2']);
++  });
++
++  it('三连发 + 前序回复：run 整体提升，回复保留', () => {
++    const t = buildTurnThread([u('U1'), u('U2'), u('U3'), a('A1')], 'U3');
++    expect(t.prompt).toBe('U1\n\nU2\n\nU3');
++    expect(textOf(t.history[0]!)).toBe('A1');
++    expectSegmentsOnce(t, ['U1', 'U2', 'U3', 'A1']);
++  });
++
++  it('派生 prompt（@ 清洗/子任务）：被提升消息视为被替换，run 前缀仍保真', () => {
++    const t = buildTurnThread([u('U1'), u('@秘書 U2')], '清洗后指令');
++    expect(t.prompt).toBe('U1\n\n清洗后指令');
++    // U2 原文被 prompt 替换（与旧 slice(0,-1) 语义一致，@ 噪音不回灌）。
++    expect(segmentList(t)).not.toContain('@秘書 U2');
++  });
++
++  it('无用户消息线程：全线程保留（旧 slice 会盲丢末段）', () => {
++    const t = buildTurnThread([a('A1'), a('A2')], 'X');
++    expect(t.prompt).toBe('X');
++    expectSegmentsOnce(t, ['A1', 'A2', 'X']);
++    expect(t.latestUserText).toBe('');
++  });
++
++  it('空线程：prompt 原样', () => {
++    const t = buildTurnThread([], 'X');
++    expect(t.history).toHaveLength(0);
++    expect(t.prompt).toBe('X');
++  });
++});
++
++describe('buildTurnThread — 契约 2：合法（接口缝严格交替）', () => {
++  const threads: ConversationMessage[][] = [
++    [],
++    [u('U1')],
++    [u('U1'), u('U2')],
++    [u('U1'), a('A1')],
++    [u('U1'), a('A1'), u('U2')],
++    [u('U1'), u('U2'), a('A1')],
++    [u('U1'), a('A1'), a('A2')],
++    [u('U1'), a('A1'), u('U2'), u('U3'), a('A2'), a('A3'), u('U4')],
++    [a('A1')],
++    [a('A1'), u('U1'), a('A2'), u('U2')],
++  ];
++
++  it('history 不以 user 收尾（有 user 轮时），prompt 追加后无相邻同角色', () => {
++    for (const msgs of threads) {
++      const t = buildTurnThread(msgs, 'PROMPT');
++      if (t.history.length > 0 && msgs.some((m) => m.role === 'user')) {
++        expect(t.history[t.history.length - 1]!.role).not.toBe('user');
++      }
++      // history 内部已折叠 → 无相邻同角色。
++      for (let k = 1; k < t.history.length; k++) {
++        expect(t.history[k]!.role).not.toBe(t.history[k - 1]!.role);
++      }
++    }
++  });
++
++  it('折叠后的 history 段数不增、blocks 全保留', () => {
++    const msgs = [u('U1'), u('U2'), a('A1'), a('A2'), u('U3')];
++    const t = buildTurnThread(msgs, 'U3');
++    expect(t.history.length).toBeLessThanOrEqual(msgs.length - 1);
++    const blockCount = t.history.reduce((n, m) => n + m.blocks.length, 0);
++    expect(blockCount).toBe(4); // U1 U2 A1 A2，段界不丢
++  });
++});
++
++describe('buildTurnThread — 契约 3：latestUserText 提升定位', () => {
++  it('取最后一条 user 原文（末位是回复时不误判）', () => {
++    const t = buildTurnThread([u('U1'), a('A1'), u('U2'), a('A2')], 'P');
++    expect(t.latestUserText).toBe('U2');
++  });
++});
+diff --git a/server/src/lib/turn-thread.ts b/server/src/lib/turn-thread.ts
+new file mode 100644
+index 0000000..b956a3a
+--- /dev/null
++++ b/server/src/lib/turn-thread.ts
+@@ -0,0 +1,121 @@
++/**
++ * turn-thread.ts — Whole-thread 回放保真（2026-11-07，OpenBot「thread 丢段即
++ * 测试红」契约）。
++ *
++ * 聊天派发路径把持久化线程组装成一次 LLM turn 的 (history, prompt) 时，此前
++ * 用 `history.slice(0, -1)` 盲删末位来"剔除被提升为 prompt 的用户消息"。这只
++ * 在末位恰好是那条用户消息时成立，两个实缺口：
++ *
++ *   1. 多 agent 串行轮（群/DM fan-out 第 2+ 个 agent）——每轮 reload 线程后
++ *      末位是**上一个 agent 的回复**，被整条删掉：后发言者看不到先发言者说了
++ *      什么（与「Reload each round so later agents see earlier replies」注释
++ *      相反），而用户消息反而留在 history 里与 prompt 重复出现。
++ *   2. 末位不是用户消息的任何线程（如无用户消息/异常触发）都会随机丢一段。
++ *
++ * 本模块把「提升用户轮 + 折叠相邻同角色」收成纯函数，保证三条契约（见
++ * buildTurnThread）。Anthropic Messages API 要求 user/assistant 严格交替，两
++ * 相邻同角色封包 → HTTP 422（见 anthropic-block-adapter.ts §toAnthropicMessages），
++ * 故折叠不只是整洁性问题，是 provider 合法性问题。
++ */
++
++import type { ConversationMessage } from './conversation-types';
++
++/** 从一条消息取全部 text block 的拼接（prompt 侧只消费文本段）。 */
++export function textOf(message: ConversationMessage): string {
++  return message.blocks
++    .map((b) => (b.kind === 'text' ? b.text : ''))
++    .join('');
++}
++
++/**
++ * 折叠相邻同角色消息为一条，blocks 按原序拼接（每段仍是独立 block，段界不丢）。
++ * usage 只在请求侧占位（适配器发线时丢弃），折叠取首条非空值。
++ * 不改入参（返回新对象/新数组）。
++ */
++export function foldConsecutiveRoles(
++  messages: ConversationMessage[],
++): ConversationMessage[] {
++  const out: ConversationMessage[] = [];
++  for (const m of messages) {
++    const last = out[out.length - 1];
++    if (last && last.role === m.role) {
++      const usage = last.usage ?? m.usage;
++      out[out.length - 1] = {
++        ...last,
++        blocks: [...last.blocks, ...m.blocks],
++        ...(usage ? { usage } : {}),
++      };
++    } else {
++      out.push({ ...m, blocks: [...m.blocks] });
++    }
++  }
++  return out;
++}
++
++export interface TurnThread {
++  /**
++   * 剔除被提升用户轮后的线程（相邻同角色已折叠），原序保留。
++   * 不变量：只要线程里有 user 消息，history 不会以 'user' 收尾——prompt 由
++   * callable 追加为最后一条 user 消息，保证接口缝上严格交替。
++   */
++  history: ConversationMessage[];
++  /**
++   * 提升后的 prompt 文本：被提升 user run 里较早的段在前（原序）、调用方传入
++   * 的 promptText 在后，以 \n\n 连接。promptText 为空时只输出 run 文本。
++   */
++  prompt: string;
++  /** 被提升的最后一条用户消息原文（mention 清洗/fallback 用）；无用户消息 = ''。 */
++  latestUserText: string;
++}
++
++/**
++ * 组装一次 turn 的 (history, prompt)。三条契约（测试见
++ * lib/__tests__/turn-thread.test.ts，丢段/重复即红）：
++ *
++ *   1. 保真 —— 线程每个文本段在 history + prompt 中恰好出现一次。被提升的
++ *      最后一条用户消息由 promptText 承载（plain 情形 promptText 即其原文）；
++ *      与它连续的更早用户段并入 prompt 前缀。若调用方用派生 promptText（@
++ *      清洗文本 / 意图拆解子任务），被提升消息视为**被替换**（与旧
++ *      slice(0,-1) 语义一致，@ 噪音/原文不重复回灌）。
++ *   2. 合法 —— history 内相邻同角色折叠；history 不以 'user' 收尾（见
++ *      TurnThread.history 注释），拼上 prompt 后整串严格交替。
++ *   3. 不丢 —— 除被提升（或被替换）的用户轮外，任何消息都不被丢弃：多 agent
++ *      串行轮的前序回复、末位非用户的线程全部保留。
++ */
++export function buildTurnThread(
++  messages: ConversationMessage[],
++  promptText: string,
++): TurnThread {
++  // 定位最后一条 user 消息。
++  let i = -1;
++  for (let k = messages.length - 1; k >= 0; k--) {
++    if (messages[k].role === 'user') {
++      i = k;
++      break;
++    }
++  }
++  if (i < 0) {
++    // 无用户消息：无可提升，全线程保留（旧 slice(0,-1) 在这里会盲丢末段）。
++    return {
++      history: foldConsecutiveRoles(messages),
++      prompt: promptText,
++      latestUserText: '',
++    };
++  }
++  // user run：从最后一条 user 往前扩到连续 user 段（双连发/多连发的整段）。
++  let j = i;
++  while (j - 1 >= 0 && messages[j - 1].role === 'user') j--;
++  const runTexts = messages.slice(j, i + 1).map(textOf);
++  const latestUserText = runTexts[runTexts.length - 1] ?? '';
++  // run 之外的两截（前段 + 后段）原序保留——后段是本回合更早 agent 的回复
++  // （串行 fan-out 逐轮 reload 时就在尾部），正是旧 slice(0,-1) 误删的部分。
++  const prior = [...messages.slice(0, j), ...messages.slice(i + 1)];
++  // run 里较早的用户段并入 prompt 前缀（内容不丢、接口缝不出现相邻 user）。
++  const prefix = runTexts.slice(0, -1).filter((t) => t.length > 0);
++  const prompt = [...prefix, promptText].filter((t) => t.length > 0).join('\n\n');
++  return {
++    history: foldConsecutiveRoles(prior),
++    prompt,
++    latestUserText,
++  };
++}
+diff --git a/server/src/routes/__tests__/groups-chat-turn-thread.test.ts b/server/src/routes/__tests__/groups-chat-turn-thread.test.ts
+new file mode 100644
+index 0000000..a69cba3
+--- /dev/null
++++ b/server/src/routes/__tests__/groups-chat-turn-thread.test.ts
+@@ -0,0 +1,223 @@
++/**
++ * groups-chat-turn-thread.test.ts — whole-thread 回放保真接线契约（2026-11-07）。
++ *
++ * 「thread 丢段即测试红」在派发路径上的落点：callable.turn 收到的
++ * (history, prompt) 必须覆盖持久化线程每个文本段恰好一次。
++ *
++ * 回归背景：旧 `history.slice(0, -1)` 盲删末位——串行 fan-out 第 2 个 agent 的
++ * 线程末位是第 1 个 agent 的回复，被整条删掉（后发言者看不到先发言者，与
++ * 「Reload each round so later agents see earlier replies」注释相反），用户消息
++ * 反而留在 history 里与 prompt 重复。纯函数契约见 lib/__tests__/turn-thread.test.ts。
++ *
++ * 真实 SQLite（临时 cwd 隔离）+ 其余重依赖 mock（groups-chat-lessons-system 同款）。
++ *
++ * Run:
++ *   npx vitest run --config vitest.server.config.ts server/src/routes/__tests__/groups-chat-turn-thread.test.ts
++ */
++import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
++import { mkdtempSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++
++// ── mock 重依赖（模块级，import 路由前生效）────────────────────────────────
++
++const teamShape = {
++  name: '双人组',
++  members: ['pm', 'arch'] as string[],
++  edges: [{ from: 'pm', to: 'arch', kind: 'sequential' as const }],
++  policy_matrix: {},
++};
++vi.mock('../../lib/team-source', () => ({
++  loadTeamForRun: vi.fn(() => ({ team: teamShape, errors: [] })),
++}));
++
++const agentRecords: Record<string, { agent_id: string; name: string; soul: string }> = {
++  pm: { agent_id: 'pm', name: '总经理', soul: 'soul-pm' },
++  arch: { agent_id: 'arch', name: '架构汪', soul: 'soul-arch' },
++};
++
++const groupRecord = {
++  group_id: 'g1',
++  agent_ids: ['pm'] as string[],
++  messages: [] as Array<{ content: string; sender_kind: string; sender_name: string; timestamp?: string }>,
++  kind: 'dm' as string,
++  team_id: null as string | null,
++};
++const postedMessages: Array<{ content: string; sender_name: string; sender_kind: string; agent_id?: string }> = [];
++vi.mock('../../storage/groups-backend', () => ({
++  getGroupsBackend: () => ({
++    // 共享 messages 数组引用：appendMessage 的落库即后续 reload 可见（每轮
++    // reload「so later agents see earlier replies」的语义前提）。
++    getGroup: vi.fn(async (id: string) => ({ ...groupRecord, group_id: id })),
++    appendMessage: vi.fn(async (_id: string, body: { content: string; sender_name: string; sender_kind: string; agent_id?: string }) => {
++      postedMessages.push(body);
++      groupRecord.messages.push({
++        content: body.content,
++        sender_kind: body.sender_kind,
++        sender_name: body.sender_name,
++      });
++      return { ...body, message_id: `m-${postedMessages.length}` };
++    }),
++  }),
++}));
++
++// agent 读取走全局 fetch（pyGet 非群路径）。
++vi.stubGlobal('fetch', vi.fn(async (url: string) => {
++  const m = /\/api\/agents\/([^/]+)$/.exec(String(url));
++  if (m) {
++    const a = agentRecords[decodeURIComponent(m[1])];
++    if (a) {
++      return new Response(JSON.stringify({ data: a }), {
++        status: 200,
++        headers: { 'Content-Type': 'application/json' },
++      });
++    }
++  }
++  return new Response('{}', { status: 404 });
++}));
++vi.mock('../../python-backend', () => ({ PYTHON_BACKEND_URL: 'http://127.0.0.1:1' }));
++
++// dispatcher：可观测 fake，捕获 system/prompt/history 原样；回复带调用序水印
++// （第 2 个 agent 的 history 里应能看到第 1 个 agent 的回复水印）。
++const turnCalls: Array<{ system: string; prompt: string; history: unknown[]; replyText: string }> = [];
++vi.mock('../../transport/dispatcher', () => ({
++  resolveCallable: () => ({
++    turn: async function* (args: { system: string; prompt: string; history: unknown[] }) {
++      const replyText = `回复水印-${turnCalls.length + 1}`;
++      turnCalls.push({ system: args.system, prompt: args.prompt, history: args.history, replyText });
++      yield { type: 'text-delta', value: replyText };
++    },
++  }),
++}));
++
++// gateway run：内存 gw。
++vi.mock('../../lib/gateway-run', () => ({
++  startGatewayRun: vi.fn(() => {
++    let n = 0;
++    return {
++      sessionId: 'gw-s1',
++      conversationId: 'c1',
++      turnId: 'turn-1',
++      nextId: () => `gw-${++n}`,
++      emitMessage: vi.fn(),
++      emitPatch: vi.fn(),
++      finish: vi.fn(),
++    };
++  }),
++}));
++
++// worktree：非 git 环境短路。
++vi.mock('../../lib/worktree-manager', () => ({
++  isGitWorkable: vi.fn(async () => false),
++  prepareWorktree: vi.fn(async () => null),
++  integrateAll: vi.fn(async () => []),
++  commitWorktree: vi.fn(async () => null),
++}));
++
++import { runFanoutAsync } from '../groups-chat';
++import type { ConversationMessage } from '../../lib/conversation-types';
++
++let tmp: string;
++let origCwd: string;
++
++beforeAll(async () => {
++  origCwd = process.cwd();
++  tmp = mkdtempSync(path.join(tmpdir(), 'sf-chat-turn-thread-'));
++  process.chdir(tmp);
++  const sqlite = await import('../../storage/sqlite');
++  sqlite._resetForTests();
++  sqlite.getDb();
++});
++
++afterAll(() => {
++  process.chdir(origCwd);
++  try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }
++});
++
++beforeEach(() => {
++  turnCalls.length = 0;
++  postedMessages.length = 0;
++  groupRecord.messages.length = 0;
++  groupRecord.kind = 'dm';
++  groupRecord.team_id = null;
++  groupRecord.agent_ids = ['pm'];
++});
++
++/** turn 的 history 文本段清单（按序）。 */
++function historyTexts(history: unknown[]): string[] {
++  const out: string[] = [];
++  for (const m of history as ConversationMessage[]) {
++    for (const b of m.blocks) {
++      if (b.kind === 'text' && b.text) out.push(b.text);
++    }
++  }
++  return out;
++}
++
++describe('串行 fan-out（DM / 无 team 群）— whole-thread 回放保真', () => {
++  it('第 2 个 agent 的 turn 看得到第 1 个 agent 的回复，用户消息不重复（丢段即红）', async () => {
++    groupRecord.kind = 'group';
++    groupRecord.agent_ids = ['pm', 'arch'];
++    groupRecord.messages.push(
++      { content: '帮我复盘下昨天的投放', sender_kind: 'user', sender_name: 'boss' },
++    );
++    await runFanoutAsync('g1', 'cli:claude', undefined, {}, '帮我复盘下昨天的投放');
++
++    expect(turnCalls).toHaveLength(2);
++    const [first, second] = turnCalls;
++    // 第 1 个 agent：prompt = 用户原文；history 不含它（不与 prompt 重复）。
++    expect(first!.prompt).toBe('帮我复盘下昨天的投放');
++    expect(historyTexts(first!.history)).not.toContain('帮我复盘下昨天的投放');
++    // 第 2 个 agent：第 1 个 agent 的回复水印必须在 history 里（旧 slice(0,-1)
++    // 会把线程末位的它删掉——本断言即「丢段即红」）。
++    expect(historyTexts(second!.history)).toContain(first!.replyText);
++    // 用户原文在 history + prompt 合计恰好一次。
++    const segments = [...historyTexts(second!.history), second!.prompt];
++    expect(segments.filter((s) => s === '帮我复盘下昨天的投放')).toHaveLength(1);
++    expect(second!.prompt).toBe('帮我复盘下昨天的投放');
++  });
++
++  it('双连发（用户连发两条、中间无回复）：prompt 并入前段，无相邻 user 重复', async () => {
++    groupRecord.messages.push(
++      { content: '先看下天气', sender_kind: 'user', sender_name: 'boss' },
++      { content: '顺便看看新闻', sender_kind: 'user', sender_name: 'boss' },
++    );
++    await runFanoutAsync('g1', 'cli:claude', undefined, {}, '顺便看看新闻');
++
++    expect(turnCalls).toHaveLength(1);
++    // 两段都进 prompt（较早在前）；history 为空——不丢不重复，接口缝严格交替。
++    expect(turnCalls[0]!.prompt).toBe('先看下天气\n\n顺便看看新闻');
++    expect(turnCalls[0]!.history).toHaveLength(0);
++  });
++});
++
++describe('DAG 路径（team 群）— 快照线程不盲删末段', () => {
++  it('末位是用户消息：提升不重复；前序回复保留（丢段即红）', async () => {
++    groupRecord.kind = 'group';
++    groupRecord.team_id = 't1';
++    groupRecord.agent_ids = ['pm', 'arch'];
++    groupRecord.messages.push(
++      { content: '第一轮问题', sender_kind: 'user', sender_name: 'boss' },
++      { content: '上一轮的作答', sender_kind: 'agent', sender_name: '总经理' },
++      { content: '第二轮问题', sender_kind: 'user', sender_name: 'boss' },
++    );
++    await runFanoutAsync('g1', 'cli:claude', undefined, {}, '第二轮问题');
++
++    expect(turnCalls).toHaveLength(2);
++    for (const call of turnCalls) {
++      // 段清单：history 各 text block + prompt 按 \n\n 拆段（与纯函数测试同规则）。
++      const segments = [...historyTexts(call.history), ...call.prompt.split('\n\n')].filter(Boolean);
++      // 上一轮作答不丢（旧 slice(0,-1) 只在末位=用户时无恙，这里钉死不回归）。
++      expect(historyTexts(call.history)).toContain('上一轮的作答');
++      // 被提升的用户消息不留在 history（不与 prompt 重复）。
++      expect(historyTexts(call.history)).not.toContain('第二轮问题');
++      // 第一轮问题保真。
++      expect(historyTexts(call.history)).toContain('第一轮问题');
++      // 被提升的用户消息恰好出现一次（不丢不重复）。
++      expect(segments.filter((s) => s === '第二轮问题')).toHaveLength(1);
++    }
++    // 上游经 upstream 流转：下游 prompt 带上游产出（DAG 设计语义不变）。
++    expect(turnCalls[1]!.prompt).toContain('第二轮问题');
++    expect(turnCalls[1]!.prompt).toContain('上游 agent 产出');
++  });
++});
+diff --git a/server/src/routes/groups-chat.ts b/server/src/routes/groups-chat.ts
+index 2296fbf..e2afddd 100644
+--- a/server/src/routes/groups-chat.ts
++++ b/server/src/routes/groups-chat.ts
+@@ -35,6 +35,7 @@ import { resolveCallable } from '../transport/dispatcher';
+ import { resolveProviderKey } from '../transport/byokKey';
+ import { isProviderId } from '../transport/api-clients';
+ import type { ConversationMessage } from '../lib/conversation-types';
++import { buildTurnThread } from '../lib/turn-thread';
+ import { loadTeamForRun } from '../lib/team-source';
+ import { runTeamDagFanout, type RunTeamDagDeps, type HopRecorder } from '../lib/chat-dag/run-team-dag';
+ import { computeDagLayers } from '../lib/chat-dag/dag-layers';
+@@ -1190,6 +1191,10 @@ async function runFanout(
+             // 无拆解（无 key/失败/未分配）→ 用户原文（现状）。
+             const task = taskByAgent.get(agentId);
+             const basePrompt = task ? task.prompt : userPrompt;
++            // Whole-thread 回放保真（2026-11-07）— 与串行路径同款 buildTurnThread，
++            // 取代 history0.slice(0,-1) 盲删末位（末位非用户消息时会随机丢段）。
++            // prompt 是派生子任务时，被提升用户轮视为被替换（意图拆解语义不变）。
++            const { history: turnHistory, prompt: turnPrompt } = buildTurnThread(history0, basePrompt);
+             // worktree 隔离 — 本轮该 agent 的专属工作目录。
+             const wt = wtByAgent.get(agentId);
+             // plan_card 任务行 → running。
+@@ -1218,8 +1223,8 @@ async function runFanout(
+               for await (const chunk of callable.turn({
+                 // 2026-11-07 记忆闭环 — soul 后附该 agent 可召回的过往经验。
+                 system: soul + chatLessonsBlock(agentId),
+-                prompt: basePrompt + kbText + upstreamText,
+-                history: history0.slice(0, -1),
++                prompt: turnPrompt + kbText + upstreamText,
++                history: turnHistory,
+                 signal,
+                 model,
+               })) {
+@@ -1404,6 +1409,11 @@ async function runFanout(
+           || latestUser?.blocks.map((b) => (b.kind === 'text' ? b.text : '')).join('')
+           || '';
+       if (prompt) serialPrompt = prompt;
++      // Whole-thread 回放保真（2026-11-07）— 提升用户轮 + 折叠相邻同角色，
++      // 取代 history.slice(0,-1) 盲删末位：串行 fan-out 第 2+ 轮末位是上一个
++      // agent 的回复，旧删法把它整条删掉（后发言者看不到先发言者），用户消息
++      // 反而与 prompt 重复。契约/测试见 lib/turn-thread.ts。
++      const { history: turnHistory, prompt: turnPrompt } = buildTurnThread(history, prompt);
+ 
+       const agent = await pyGet<AgentRecord>(`/api/agents/${encodeURIComponent(agentId)}`);
+       if (!agent) {
+@@ -1462,8 +1472,8 @@ async function runFanout(
+         for await (const chunk of callable.turn({
+           // 2026-11-07 记忆闭环 — soul 后附该 agent 可召回的过往经验（DM 同款）。
+           system: soul + chatLessonsBlock(agentId),
+-          prompt: prompt + kbText,
+-          history: history.slice(0, -1), // exclude the just-read latest user (it's the prompt)
++          prompt: turnPrompt + kbText,
++          history: turnHistory,
+           signal: ctrl.signal,
+           model,
+         })) {

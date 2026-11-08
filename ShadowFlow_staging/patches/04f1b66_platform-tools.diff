@@ -1,0 +1,2365 @@
+diff --git a/server/skills/app-deploy/SKILL.md b/server/skills/app-deploy/SKILL.md
+new file mode 100644
+index 0000000..6e1412e
+--- /dev/null
++++ b/server/skills/app-deploy/SKILL.md
+@@ -0,0 +1,52 @@
++---
++name: app-deploy
++version: 1.0.0
++description: Deploy and publish web apps and mini-programs — build, package, ship to the configured hosting target. (platform workflow)
++mode: report
++kind: workflow
++domain: ops
++preview_type: markdown
++allowed-tools:
++  - shell_exec
++  - read_file
++  - write_file
++  - glob_files
++  - fetch_url
++triggers:
++  - deploy this site
++  - publish the app
++  - ship it
++  - 部署
++  - 发布
++  - 上线
++---
++# App Deploy
++
++You take a finished web app / static site / mini-program project through
++build → package → publish on the hosting target configured for this
++environment (CLI or HTTP bridge).
++
++## Workflow
++
++1. **Pre-flight**: confirm the project entry (package.json / manifest), the
++   target (staging vs production), and that tests/build pass locally. Never
++   deploy a red build.
++2. **Build** via shell_exec (`npm run build` / project equivalent). Surface
++   build errors verbatim; fix and rebuild rather than shipping partial output.
++3. **Package**: static sites → build dir; mini-programs → the platform upload
++   package; services → container image when a Dockerfile exists.
++4. **Publish** through the configured target CLI/bridge (e.g. `sites deploy`
++   style CLI, `docker push` + release hook, or platform upload tool). Record
++   the release URL / version id.
++5. **Verify**: fetch_url the published URL and check it responds with the new
++   content; report URL + version to the user.
++
++## Guardrails
++
++- Production publishes are side-effecting: state the target and get a yes
++  before the publish step.
++- Never commit secrets into build output or images; scrub .env files.
++- Rollback plan first: know the previous version id before replacing it, and
++  offer the rollback command in your report.
++- No target configured → report exactly which CLI/bridge is missing instead
++  of improvising a host.
+diff --git a/server/skills/browser-automation/SKILL.md b/server/skills/browser-automation/SKILL.md
+new file mode 100644
+index 0000000..9ccb406
+--- /dev/null
++++ b/server/skills/browser-automation/SKILL.md
+@@ -0,0 +1,47 @@
++---
++name: browser-automation
++version: 1.0.0
++description: Drive a real browser via Playwright — fill forms, click flows, screenshots, scraping, E2E checks. (platform capability)
++mode: report
++kind: capability
++domain: web
++preview_type: markdown
++allowed-tools:
++  - shell_exec
++  - read_file
++  - write_file
++  - list_dir
++  - fetch_url
++triggers:
++  - automate the browser
++  - fill this form
++  - take a screenshot of
++  - scrape this page
++  - e2e test
++  - 浏览器自动化
++  - 填表
++  - 网页截图
++---
++# Browser Automation
++
++You drive a real browser with Playwright scripts (run via shell_exec) for UI
++flows that fetch_url cannot handle: logins, forms, SPAs, screenshots, E2E.
++
++## Workflow
++
++1. Confirm the target URL and the exact steps (what to click / type / assert).
++   For anything that submits data to a third party, get explicit user
++   confirmation first.
++2. Write a self-contained Playwright script into the workspace (write_file),
++   run it with shell_exec, headless by default.
++3. Capture artifacts: screenshots and console logs saved to the workspace;
++   report paths. On failure, include the failing selector and last screenshot.
++4. Keep selectors robust (role/text based when possible) and add a short
++   retry for flaky waits (`expect(locator).toBeVisible()` style).
++
++## Guardrails
++
++- No credential harvesting: never ask for or log passwords; if a flow needs
++  login, have the user fill it in a headed run or use their stored session.
++- Respect robots/site terms for scraping; rate-limit requests.
++- Do not run scripts downloaded from the web — author every script yourself.
+diff --git a/server/skills/github-ops/SKILL.md b/server/skills/github-ops/SKILL.md
+new file mode 100644
+index 0000000..c6896be
+--- /dev/null
++++ b/server/skills/github-ops/SKILL.md
+@@ -0,0 +1,51 @@
++---
++name: github-ops
++version: 1.0.0
++description: Operate GitHub — browse repos, triage issues and PRs, comment, open issues, manage releases. (platform capability)
++mode: report
++kind: capability
++domain: engineering
++preview_type: markdown
++allowed-tools:
++  - github_request
++  - github_write
++  - read_file
++  - write_file
++triggers:
++  - check this github issue
++  - look at the PR
++  - open a github issue
++  - comment on the issue
++  - github 上那个 issue
++  - 看看 PR
++  - 提个 issue
++---
++# GitHub Operations
++
++You work with GitHub through the REST passthrough tools:
++
++- **github_request** — GET only (repos, issues, PRs, search, releases). Works
++  unauthenticated (rate-limited); GITHUB_TOKEN raises the quota.
++- **github_write** — POST/PUT/PATCH/DELETE. Requires GITHUB_TOKEN and prompts
++  for approval on every call.
++
++## Workflow
++
++1. Parse the owner/repo/ref from the user's words or URL. Confirm the repo
++   when ambiguous (fork vs upstream).
++2. Reads: fetch with github_request paths like
++   `/repos/{owner}/{repo}/issues/{n}`,
++   `/repos/{owner}/{repo}/pulls/{n}/files`,
++   `/search/issues?q=repo:{owner}/{repo}+is:issue+...`. Paginate with
++   `?per_page=` / `page=` when the user needs "all".
++3. Writes: show the exact payload (title/body/labels) before calling
++   github_write. Keep issue/PR bodies in markdown; link related numbers.
++4. Surface rate-limit 403s honestly (the tool adds a note) — suggest
++   GITHUB_TOKEN when unset.
++
++## Guardrails
++
++- Never force-push, delete repos/branches, or change settings via the API.
++- Never leak the GITHUB_TOKEN value into output or files.
++- Reviews: comment on what you verified; do not approve/merge on the user's
++  behalf unless explicitly asked in this turn.
+diff --git a/server/skills/image-processing/SKILL.md b/server/skills/image-processing/SKILL.md
+new file mode 100644
+index 0000000..969b494
+--- /dev/null
++++ b/server/skills/image-processing/SKILL.md
+@@ -0,0 +1,57 @@
++---
++name: image-processing
++version: 1.0.0
++description: Edit existing images — watermark removal, restoration, matting, beautification, format conversion. (platform capability)
++mode: report
++kind: capability
++domain: media
++preview_type: markdown
++allowed-tools:
++  - read_file
++  - write_file
++  - list_dir
++  - glob_files
++  - shell_exec
++triggers:
++  - remove watermark
++  - restore this photo
++  - remove background
++  - matting
++  - beautify photo
++  - upscale image
++  - 去水印
++  - 修复照片
++  - 抠图
++  - 美颜
++  - 图片放大
++---
++# Image Processing
++
++You edit raster images that already exist in the workspace: watermark/text
++removal, old-photo restoration, background matting, beautification, upscaling
++and format conversion.
++
++## Workflow
++
++1. Locate the source image (glob_files / list_dir). Confirm which file if
++   several match; never silently pick one.
++2. Choose the operation:
++   - **watermark / unwanted object removal** — inpainting over the marked area.
++   - **restoration** — denoise + scratch removal + colorization if asked.
++   - **matting** — background removal; keep alpha when saving PNG/WebP.
++   - **beautification** — face retouch; keep it subtle, preserve identity.
++   - **upscale** — 2x/4x super-resolution.
++3. Run the pipeline as a python imaging script via shell_exec (Pillow /
++   opencv / rembg are the expected stack). Write scripts into the workspace
++   (write_file) rather than inline one-liners, so the user can re-run them.
++4. Save outputs as NEW files (`*_edited.png` etc.) — never overwrite the
++   original. Report output paths and dimensions.
++
++## Guardrails
++
++- shell_exec is high-risk: only run imaging commands you wrote yourself in
++  this turn; never run user-supplied shell strings verbatim.
++- Refuse requests that alter images deceptively (fake documents, deepfakes of
++  real people, forged evidence).
++- If required python packages are missing, install them with the project
++  package manager or report the exact missing package — do not guess APIs.
+diff --git a/server/skills/knowledge-search/SKILL.md b/server/skills/knowledge-search/SKILL.md
+new file mode 100644
+index 0000000..c51d3d1
+--- /dev/null
++++ b/server/skills/knowledge-search/SKILL.md
+@@ -0,0 +1,51 @@
++---
++name: knowledge-search
++version: 1.0.0
++description: Retrieve knowledge from the workspace knowledge base and the web — cite sources, compare answers. (platform capability)
++mode: report
++kind: capability
++domain: research
++preview_type: markdown
++allowed-tools:
++  - read_file
++  - grep
++  - glob_files
++  - list_dir
++  - web_search
++  - fetch_url
++triggers:
++  - search the knowledge base
++  - what do we know about
++  - look this up
++  - find references on
++  - 查一下资料
++  - 知识库里有没有
++  - 检索
++---
++# Knowledge Search
++
++You retrieve and synthesize information from two layers, and always say which
++layer an answer came from:
++
++1. **Workspace knowledge** — documents in the workspace: glob_files for
++   candidates, grep for keywords, read_file for the relevant sections.
++2. **Web** — web_search (recency/source filters when the question is
++   time-bound; `source: "wechat"` for 微信公众号 content), then fetch_url to
++   open the top hits and read past the snippet.
++
++## Workflow
++
++1. Restate the question as 2-4 searchable phrasings (EN + 中文 when useful).
++2. Workspace first (it is cheaper and more authoritative for project facts);
++   fall back to web for current events / external facts.
++3. Answer with citations: file paths for workspace sources, URLs for web
++   sources. Mark anything uncertain as unverified.
++4. When sources conflict, present both and say which is more recent or
++   better-sourced — do not silently pick one.
++
++## Guardrails
++
++- web_search stub ("no provider configured") means NO real search happened —
++  say so; never answer such a turn from memory as if it were searched.
++- WeChat 公众号 search needs SERPAPI_API_KEY; note the fallback when the tool
++  reports one.
+diff --git a/server/skills/media-generation/SKILL.md b/server/skills/media-generation/SKILL.md
+new file mode 100644
+index 0000000..ad15d94
+--- /dev/null
++++ b/server/skills/media-generation/SKILL.md
+@@ -0,0 +1,56 @@
++---
++name: media-generation
++version: 1.0.0
++description: Generate images, short videos, and 3D models from text prompts via configured providers. (platform capability)
++mode: report
++kind: generator
++domain: media
++preview_type: markdown
++allowed-tools:
++  - image_generate
++  - video_generate
++  - generate_3d
++  - write_file
++  - read_file
++triggers:
++  - generate an image
++  - make a picture of
++  - generate a video
++  - text to video
++  - generate a 3d model
++  - text to 3d
++  - 生成图片
++  - 生成视频
++  - 生成 3D 模型
++---
++# Media Generation
++
++You generate visual media from text prompts using the platform generation
++tools. Pick the right tool for the request:
++
++- **image_generate** — still images (illustrations, photos, mockups, logos).
++- **video_generate** — short videos. Costly: the tool prompts for approval.
++  Providers may return an async job handle instead of a finished file; when
++  they do, tell the user the job id and how to poll it (fetch_url).
++- **generate_3d** — 3D assets (default format glb). Costly: prompts for
++  approval.
++
++## Workflow
++
++1. Restate the visual brief in one line (subject, style, aspect, mood) before
++   calling the tool — fix ambiguity only if the brief is truly unusable.
++2. Write prompts in the language the provider expects (English for most
++   image/video models) but confirm with the user in their language.
++3. For batch requests (multiple images), generate one first, let the user
++   approve the style, then continue.
++4. Save any returned local artifacts into the workspace with write_file and
++   report the paths.
++
++## Provider notes
++
++- No provider configured → the tools return a structured stub (`provider:
++  "stub"`). In that case DO NOT pretend generation happened: report the stub
++  note verbatim and list the env vars to configure (SF_IMAGE_API_BASE /
++  SF_VIDEO_API_BASE / SF_3D_API_BASE).
++- Refuse prompts depicting real people in compromising contexts, or anything
++  illegal; offer a sanitized alternative instead.
+diff --git a/server/skills/messaging/SKILL.md b/server/skills/messaging/SKILL.md
+new file mode 100644
+index 0000000..13bcdc3
+--- /dev/null
++++ b/server/skills/messaging/SKILL.md
+@@ -0,0 +1,52 @@
++---
++name: messaging
++version: 1.0.0
++description: Chat and email — list conversations, read history, send messages and emails through configured bridges. (platform capability)
++mode: report
++kind: capability
++domain: comms
++preview_type: markdown
++allowed-tools:
++  - im_read
++  - im_send
++  - send_email
++triggers:
++  - read my chats
++  - send a message to
++  - send an email
++  - check this conversation
++  - 发消息
++  - 发邮件
++  - 看看聊天记录
++---
++# Messaging & Email
++
++You read chat/messaging history and send messages or emails through the
++platform bridges:
++
++- **im_read** — `list_conversations` for the chat list, `read_messages` for
++  one conversation's history (needs `conversation_id`).
++- **im_send** — send text to one conversation. Side-effecting: the tool
++  prompts for approval.
++- **send_email** — email with optional base64 attachments. Side-effecting:
++  prompts for approval.
++
++## Workflow
++
++1. For "check X" requests: im_read first, summarize findings with times and
++   participants; quote only what answers the question.
++2. For sends: draft the exact text/subject and show it to the user BEFORE the
++   tool call. Keep the user's voice and language; never add claims they did
++   not approve.
++3. Emails: plain text by default; use html only for real formatting needs;
++   attach only files the user named.
++
++## Guardrails
++
++- No provider configured → tools return a stub and NOTHING is sent. Report
++  the stub note and the env vars to configure (SF_IM_API_BASE /
++  SF_MAIL_API_BASE or RESEND_API_KEY + SF_MAIL_FROM) — never claim delivery.
++- Never send to recipients the user did not name; re-confirm when the address
++  list is ambiguous.
++- Private content you read stays in this conversation; do not echo unrelated
++  history into a reply.
+diff --git a/server/skills/office-suite/SKILL.md b/server/skills/office-suite/SKILL.md
+new file mode 100644
+index 0000000..074e434
+--- /dev/null
++++ b/server/skills/office-suite/SKILL.md
+@@ -0,0 +1,63 @@
++---
++name: office-suite
++version: 1.0.0
++description: Create and edit Word / Excel / PowerPoint documents, analyze table data, beautify document layouts. (platform capability)
++mode: report
++kind: generator
++domain: content
++preview_type: markdown
++allowed-tools:
++  - read_file
++  - write_file
++  - edit_file
++  - glob_files
++  - list_dir
++  - shell_exec
++triggers:
++  - make a ppt
++  - create a spreadsheet
++  - write a word document
++  - edit this xlsx
++  - analyze this table
++  - beautify this document
++  - 做个 PPT
++  - 生成 excel
++  - 写个 word
++  - 表格分析
++  - 文档美化
++---
++# Office Suite
++
++You produce and edit Office deliverables: `.docx` (Word), `.xlsx` (Excel),
++`.pptx` (PowerPoint) — plus CSV/table analysis and document layout polish.
++
++## Toolchain
++
++Drive python libraries through shell_exec scripts written into the workspace:
++- `.docx` → python-docx
++- `.xlsx` → openpyxl (formulas, styles, charts)
++- `.pptx` → python-pptx
++- table analysis → pandas; charts → matplotlib (embed as images)
++
++Write each script to a file (write_file) and run it with shell_exec. Never
++paste multi-line python as shell one-liners.
++
++## Workflow
++
++1. Restate deliverable type, audience, and outline; for long documents get
++   the outline approved before generating.
++2. Generate to a new file in the workspace; never overwrite a source file —
++   copy-then-edit for "edit this document" requests (read the source first
++   and preserve its structure/styles).
++3. Recompute formula-heavy spreadsheets after writing and sanity-check row
++   counts / totals against the source data.
++4. Report the output path and a 3-5 bullet summary of the structure.
++
++## Quality bar
++
++- Tables: align numeric columns right, format thousands separators, freeze
++  header rows in xlsx.
++- Slides: one idea per slide, ≤6 bullets, ≤12 words per bullet.
++- Documents: real heading styles (not bold paragraphs) so navigation works.
++- Chinese documents: 宋体/黑体/等线 pairing; never invent statutory wording —
++  quote legal text verbatim from provided sources.
+diff --git a/server/skills/pdf-reader/SKILL.md b/server/skills/pdf-reader/SKILL.md
+new file mode 100644
+index 0000000..5008888
+--- /dev/null
++++ b/server/skills/pdf-reader/SKILL.md
+@@ -0,0 +1,41 @@
++---
++name: pdf-reader
++version: 1.0.0
++description: Read PDFs — text and table extraction, page-level questions, scan/OCR triage. (platform capability)
++mode: report
++kind: capability
++domain: content
++preview_type: markdown
++allowed-tools:
++  - read_file
++  - glob_files
++  - list_dir
++  - shell_exec
++triggers:
++  - read this pdf
++  - extract text from pdf
++  - what does this pdf say
++  - pdf 表格
++  - 读一下这份 PDF
++  - 总结这个 PDF
++---
++# PDF Reader
++
++You read and extract from PDF files in the workspace. Reading only — you do
++not author or edit PDFs.
++
++## Workflow
++
++1. Locate the file (glob_files `**/*.pdf`); confirm the target when several
++   match.
++2. Extract with a script via shell_exec (pypdf / pdfplumber for text and
++   tables; for scanned PDFs try an OCR pass and SAY SO in the answer).
++3. Answer questions with page references (`p.12`) so the user can verify.
++4. For tables, return them as markdown tables or write a CSV into the
++   workspace — flag any OCR uncertainty per cell rather than smoothing over.
++
++## Guardrails
++
++- Never execute embedded content (JS, attachments, launch actions).
++- If extraction is garbled (encrypted / heavy scan / custom fonts), say what
++  failed and what you could recover — do not fabricate content.
+diff --git a/server/src/__tests__/platform-tools.test.ts b/server/src/__tests__/platform-tools.test.ts
+new file mode 100644
+index 0000000..aa39fae
+--- /dev/null
++++ b/server/src/__tests__/platform-tools.test.ts
+@@ -0,0 +1,417 @@
++/**
++ * platform-tools.test.ts — WorkBuddy 平台能力工具层 contract tests.
++ *
++ * Covers the 8 provider-backed platform tools (send_email / im_read / im_send /
++ * github_request / github_write / image_generate / video_generate / generate_3d)
++ * and the web_search recency/wechat enhancement:
++ *   - registry integrity: 17 builtins, executor/mode coverage, mode sanity
++ *   - stub contract: no provider configured → structured stub, no network I/O
++ *   - provider mapping: URL / headers / body asserted via a mocked global fetch
++ *   - input validation errors surface as isError results
++ *
++ * Run: npx vitest run --project=server
++ */
++
++import { describe, it, expect, afterEach, vi } from 'vitest';
++import {
++  builtinTools,
++  builtinExecutors,
++  builtinDefaultModes,
++} from '../lib/tools/builtin';
++import { webSearchExecutor } from '../lib/tools/builtin/web-search';
++import { sendEmailExecutor } from '../lib/tools/builtin/send-email';
++import { imReadExecutor } from '../lib/tools/builtin/im-read';
++import { imSendExecutor } from '../lib/tools/builtin/im-send';
++import {
++  githubRequestExecutor,
++  githubWriteExecutor,
++} from '../lib/tools/builtin/github';
++import { imageGenerateExecutor } from '../lib/tools/builtin/image-generate';
++import { videoGenerateExecutor } from '../lib/tools/builtin/video-generate';
++import { generate3dExecutor } from '../lib/tools/builtin/three-d-generate';
++import type { BuiltinToolContext } from '../lib/tools/builtin/types';
++
++// ─── helpers ────────────────────────────────────────────────────────────────
++
++function makeCtx(env: Record<string, string> = {}): BuiltinToolContext {
++  return {
++    workspace: '/tmp/sf-platform-test',
++    signal: new AbortController().signal,
++    env,
++  };
++}
++
++interface FetchCall {
++  url: string;
++  init: {
++    method?: string;
++    headers?: Record<string, string>;
++    body?: string;
++    signal?: AbortSignal;
++  };
++}
++
++function mockFetch(
++  response: { status: number; json?: unknown; text?: string },
++): FetchCall[] {
++  const calls: FetchCall[] = [];
++  vi.stubGlobal(
++    'fetch',
++    vi.fn(async (url: string | URL, init: FetchCall['init'] = {}) => {
++      calls.push({ url: String(url), init });
++      const bodyText =
++        response.text ?? JSON.stringify(response.json ?? {});
++      return {
++        ok: (response.status ?? 200) < 400,
++        status: response.status ?? 200,
++        headers: new Headers(),
++        text: async () => bodyText,
++        json: async () => JSON.parse(bodyText),
++      };
++    }),
++  );
++  return calls;
++}
++
++afterEach(() => {
++  vi.unstubAllGlobals();
++  vi.restoreAllMocks();
++});
++
++// ─── registry integrity ─────────────────────────────────────────────────────
++
++describe('builtin registry (platform capability pack)', () => {
++  it('registers exactly the 17 builtin tools with unique names', () => {
++    expect(builtinTools).toHaveLength(17);
++    const names = builtinTools.map((t) => t.name);
++    expect(new Set(names).size).toBe(17);
++    for (const n of [
++      'send_email', 'im_read', 'im_send', 'github_request', 'github_write',
++      'image_generate', 'video_generate', 'generate_3d',
++    ]) {
++      expect(names).toContain(n);
++    }
++  });
++
++  it('every tool has an executor and a permission mode', () => {
++    for (const t of builtinTools) {
++      expect(typeof builtinExecutors[t.name]).toBe('function');
++      expect(['allow', 'prompt', 'deny']).toContain(builtinDefaultModes[t.name]);
++    }
++    expect(Object.keys(builtinExecutors).sort()).toEqual(
++      builtinTools.map((t) => t.name).sort(),
++    );
++  });
++
++  it('side-effecting tools default to prompt; reads default to allow', () => {
++    expect(builtinDefaultModes.send_email).toBe('prompt');
++    expect(builtinDefaultModes.im_send).toBe('prompt');
++    expect(builtinDefaultModes.github_write).toBe('prompt');
++    expect(builtinDefaultModes.video_generate).toBe('prompt');
++    expect(builtinDefaultModes.generate_3d).toBe('prompt');
++    expect(builtinDefaultModes.im_read).toBe('allow');
++    expect(builtinDefaultModes.github_request).toBe('allow');
++    expect(builtinDefaultModes.image_generate).toBe('allow');
++    expect(builtinDefaultModes.shell_exec).toBe('deny');
++  });
++});
++
++// ─── web_search recency / wechat ────────────────────────────────────────────
++
++describe('web_search recency + wechat source', () => {
++  it('returns a stub with no provider configured', async () => {
++    const calls = mockFetch({ status: 200, json: {} });
++    const res = await webSearchExecutor({ query: 'shadowflow' }, makeCtx({}));
++    expect(res.isError).toBeUndefined();
++    const out = res.output as { provider: string; count: number };
++    expect(out.provider).toBe('stub');
++    expect(out.count).toBe(0);
++    expect(calls).toHaveLength(0);
++  });
++
++  it('maps recency to SerpAPI tbs and wechat to the wechat engine', async () => {
++    const calls = mockFetch({
++      status: 200,
++      json: {
++        wechat_results: [{ title: 't', link: 'https://mp.weixin.qq.com/x', snippet: 's' }],
++      },
++    });
++    const res = await webSearchExecutor(
++      { query: 'AI 助手', recency: 'week', source: 'wechat', limit: 3 },
++      makeCtx({ SERPAPI_API_KEY: 'k' }),
++    );
++    expect(res.isError).toBeUndefined();
++    const url = new URL(calls[0].url);
++    expect(url.searchParams.get('engine')).toBe('wechat');
++    expect(url.searchParams.get('q')).toBe('AI 助手');
++    // wechat engine ignores recency/tbs
++    expect(url.searchParams.get('tbs')).toBeNull();
++    const out = res.output as { source: string; count: number; results: unknown[] };
++    expect(out.source).toBe('wechat');
++    expect(out.count).toBe(1);
++  });
++
++  it('maps recency to tbs=qdr:w for google engine', async () => {
++    const calls = mockFetch({
++      status: 200,
++      json: { organic_results: [{ title: 'a', link: 'https://a.example', snippet: 'b' }] },
++    });
++    await webSearchExecutor(
++      { query: 'q', recency: 'week' },
++      makeCtx({ SERPAPI_API_KEY: 'k' }),
++    );
++    const url = new URL(calls[0].url);
++    expect(url.searchParams.get('engine')).toBe('google');
++    expect(url.searchParams.get('tbs')).toBe('qdr:w');
++  });
++
++  it('maps recency to Tavily days and notes the wechat fallback', async () => {
++    const calls = mockFetch({
++      status: 200,
++      json: { results: [{ title: 'a', url: 'https://a.example', content: 'c' }] },
++    });
++    const res = await webSearchExecutor(
++      { query: 'q', recency: 'month', source: 'wechat' },
++      makeCtx({ TAVILY_API_KEY: 'k' }),
++    );
++    const body = JSON.parse(calls[0].init.body ?? '{}');
++    expect(body.days).toBe(30);
++    const out = res.output as { source: string; note?: string };
++    expect(out.source).toBe('web');
++    expect(out.note).toContain('SERPAPI_API_KEY');
++  });
++});
++
++// ─── send_email ─────────────────────────────────────────────────────────────
++
++describe('send_email', () => {
++  it('stubs without a provider and sends nothing', async () => {
++    const calls = mockFetch({ status: 200, json: {} });
++    const res = await sendEmailExecutor(
++      { to: 'a@example.com', subject: 'hi' },
++      makeCtx({}),
++    );
++    expect(res.isError).toBeUndefined();
++    expect((res.output as { provider: string }).provider).toBe('stub');
++    expect(calls).toHaveLength(0);
++  });
++
++  it('errors when RESEND_API_KEY is set but SF_MAIL_FROM is missing', async () => {
++    const res = await sendEmailExecutor(
++      { to: ['a@example.com'], subject: 'hi', text: 'body' },
++      makeCtx({ RESEND_API_KEY: 'k' }),
++    );
++    expect(res.isError).toBe(true);
++    expect((res.output as { error: string }).error).toContain('SF_MAIL_FROM');
++  });
++
++  it('maps to the Resend API with from/to/subject and returns the id', async () => {
++    const calls = mockFetch({ status: 200, json: { id: 'mail-1' } });
++    const res = await sendEmailExecutor(
++      { to: 'a@example.com', subject: 'hi', text: 'body', attachments: [{ filename: 'f.txt', content: 'YQ==' }] },
++      makeCtx({ RESEND_API_KEY: 'k', SF_MAIL_FROM: 'bot@example.com' }),
++    );
++    expect(res.isError).toBeUndefined();
++    expect(calls[0].url).toBe('https://api.resend.com/emails');
++    expect(calls[0].init.headers?.authorization).toBe('Bearer k');
++    const body = JSON.parse(calls[0].init.body ?? '{}');
++    expect(body.from).toBe('bot@example.com');
++    expect(body.to).toEqual(['a@example.com']);
++    expect(body.attachments).toHaveLength(1);
++    expect((res.output as { id: string }).id).toBe('mail-1');
++  });
++
++  it('posts to the generic mail bridge when SF_MAIL_API_BASE is set', async () => {
++    const calls = mockFetch({ status: 200, json: { ok: true } });
++    const res = await sendEmailExecutor(
++      { to: 'a@example.com', subject: 'hi' },
++      makeCtx({ SF_MAIL_API_BASE: 'https://mail.bridge/', SF_MAIL_API_TOKEN: 't' }),
++    );
++    expect(res.isError).toBeUndefined();
++    expect(calls[0].url).toBe('https://mail.bridge/send');
++    expect(calls[0].init.headers?.authorization).toBe('Bearer t');
++    expect((res.output as { provider: string }).provider).toBe('http');
++  });
++
++  it('rejects invalid input', async () => {
++    const res = await sendEmailExecutor({ subject: 'x' }, makeCtx({}));
++    expect(res.isError).toBe(true);
++  });
++});
++
++// ─── im_read / im_send ──────────────────────────────────────────────────────
++
++describe('im_read / im_send', () => {
++  it('im_read stubs without a bridge', async () => {
++    const calls = mockFetch({ status: 200, json: {} });
++    const res = await imReadExecutor({ action: 'list_conversations' }, makeCtx({}));
++    expect(res.isError).toBeUndefined();
++    expect((res.output as { provider: string }).provider).toBe('stub');
++    expect(calls).toHaveLength(0);
++  });
++
++  it('im_read builds the conversations and messages URLs', async () => {
++    const calls = mockFetch({ status: 200, json: { conversations: [], messages: [] } });
++    const ctx = makeCtx({ SF_IM_API_BASE: 'https://im.bridge', SF_IM_API_TOKEN: 't' });
++    await imReadExecutor({ action: 'list_conversations', limit: 5 }, ctx);
++    expect(calls[0].url).toBe('https://im.bridge/conversations?limit=5');
++    expect(calls[0].init.headers?.authorization).toBe('Bearer t');
++    await imReadExecutor({ action: 'read_messages', conversation_id: 'c 1', limit: 2 }, ctx);
++    expect(calls[1].url).toBe('https://im.bridge/conversations/c%201/messages?limit=2');
++  });
++
++  it('im_read requires conversation_id for read_messages', async () => {
++    const res = await imReadExecutor({ action: 'read_messages' }, makeCtx({}));
++    expect(res.isError).toBe(true);
++  });
++
++  it('im_send stubs without a bridge and posts when configured', async () => {
++    const calls = mockFetch({ status: 200, json: { id: 'm1' } });
++    const stub = await imSendExecutor(
++      { conversation_id: 'c1', text: 'hello' },
++      makeCtx({}),
++    );
++    expect((stub.output as { provider: string }).provider).toBe('stub');
++    expect(calls).toHaveLength(0);
++
++    const res = await imSendExecutor(
++      { conversation_id: 'c1', text: 'hello' },
++      makeCtx({ SF_IM_API_BASE: 'https://im.bridge' }),
++    );
++    expect(res.isError).toBeUndefined();
++    expect(calls[0].url).toBe('https://im.bridge/messages');
++    expect(JSON.parse(calls[0].init.body ?? '{}')).toEqual({
++      conversation_id: 'c1',
++      text: 'hello',
++    });
++  });
++
++  it('im_send rejects invalid input', async () => {
++    const res = await imSendExecutor({ conversation_id: 'c1' }, makeCtx({}));
++    expect(res.isError).toBe(true);
++  });
++});
++
++// ─── github_request / github_write ──────────────────────────────────────────
++
++describe('github_request / github_write', () => {
++  it('github_request GETs api.github.com with optional token', async () => {
++    const calls = mockFetch({ status: 200, json: { id: 1 } });
++    const res = await githubRequestExecutor(
++      { path: '/repos/owner/repo/issues' },
++      makeCtx({ GITHUB_TOKEN: 'tok' }),
++    );
++    expect(res.isError).toBeUndefined();
++    expect(calls[0].url).toBe('https://api.github.com/repos/owner/repo/issues');
++    expect(calls[0].init.method).toBe('GET');
++    expect(calls[0].init.headers?.authorization).toBe('Bearer tok');
++    expect((res.output as { status: number }).status).toBe(200);
++  });
++
++  it('github_request rejects unsafe paths', async () => {
++    for (const p of ['//evil.com/x', 'https://evil.com', '/a b', 'repos/x']) {
++      const res = await githubRequestExecutor({ path: p }, makeCtx({}));
++      expect(res.isError).toBe(true);
++    }
++  });
++
++  it('github_request flags 403 with a rate-limit note and isError', async () => {
++    mockFetch({ status: 403, json: { message: 'rate limited' } });
++    const res = await githubRequestExecutor({ path: '/rate_limit' }, makeCtx({}));
++    expect(res.isError).toBe(true);
++    expect((res.output as { note?: string }).note).toContain('GITHUB_TOKEN');
++  });
++
++  it('github_write requires a token and passes method/body through', async () => {
++    const noTok = await githubWriteExecutor(
++      { method: 'POST', path: '/repos/o/r/issues', body: { title: 'x' } },
++      makeCtx({}),
++    );
++    expect(noTok.isError).toBe(true);
++
++    const calls = mockFetch({ status: 201, json: { id: 9 } });
++    const res = await githubWriteExecutor(
++      { method: 'POST', path: '/repos/o/r/issues', body: { title: 'x' } },
++      makeCtx({ GITHUB_TOKEN: 'tok' }),
++    );
++    expect(res.isError).toBeUndefined();
++    expect(calls[0].init.method).toBe('POST');
++    expect(JSON.parse(calls[0].init.body ?? '{}')).toEqual({ title: 'x' });
++    expect((res.output as { status: number }).status).toBe(201);
++  });
++});
++
++// ─── image / video / 3d generation ──────────────────────────────────────────
++
++describe('image_generate / video_generate / generate_3d', () => {
++  it('image_generate stubs without a provider', async () => {
++    const calls = mockFetch({ status: 200, json: {} });
++    const res = await imageGenerateExecutor({ prompt: 'a cat' }, makeCtx({}));
++    expect((res.output as { provider: string }).provider).toBe('stub');
++    expect(calls).toHaveLength(0);
++  });
++
++  it('image_generate posts to OpenAI-compatible /images/generations', async () => {
++    const calls = mockFetch({ status: 200, json: { data: [{ url: 'https://img' }] } });
++    const res = await imageGenerateExecutor(
++      { prompt: 'a cat', size: '1024x1024', n: 2 },
++      makeCtx({ SF_IMAGE_API_BASE: 'https://img.api/v1/', SF_IMAGE_API_KEY: 'k' }),
++    );
++    expect(res.isError).toBeUndefined();
++    expect(calls[0].url).toBe('https://img.api/v1/images/generations');
++    const body = JSON.parse(calls[0].init.body ?? '{}');
++    expect(body).toMatchObject({ prompt: 'a cat', size: '1024x1024', n: 2, model: 'gpt-image-1' });
++    expect((res.output as { images: unknown[] }).images).toHaveLength(1);
++  });
++
++  it('image_generate surfaces provider errors', async () => {
++    mockFetch({ status: 500, json: { error: 'boom' } });
++    const res = await imageGenerateExecutor(
++      { prompt: 'x' },
++      makeCtx({ SF_IMAGE_API_BASE: 'https://img.api' }),
++    );
++    expect(res.isError).toBe(true);
++  });
++
++  it('video_generate stubs and passes through provider results', async () => {
++    const stub = await videoGenerateExecutor({ prompt: 'drone shot' }, makeCtx({}));
++    expect((stub.output as { provider: string }).provider).toBe('stub');
++
++    const calls = mockFetch({ status: 200, json: { job_id: 'v1' } });
++    const res = await videoGenerateExecutor(
++      { prompt: 'drone shot', duration: 5 },
++      makeCtx({ SF_VIDEO_API_BASE: 'https://video.api' }),
++    );
++    expect(res.isError).toBeUndefined();
++    expect(calls[0].url).toBe('https://video.api/generations');
++    expect(JSON.parse(calls[0].init.body ?? '{}')).toMatchObject({
++      prompt: 'drone shot',
++      duration: 5,
++    });
++    expect((res.output as { result: { job_id: string } }).result.job_id).toBe('v1');
++  });
++
++  it('generate_3d stubs and passes format through', async () => {
++    const stub = await generate3dExecutor({ prompt: 'a mug' }, makeCtx({}));
++    expect((stub.output as { provider: string }).provider).toBe('stub');
++
++    const calls = mockFetch({ status: 200, json: { model_url: 'https://m.glb' } });
++    const res = await generate3dExecutor(
++      { prompt: 'a mug', format: 'obj' },
++      makeCtx({ SF_3D_API_BASE: 'https://3d.api' }),
++    );
++    expect(res.isError).toBeUndefined();
++    expect(JSON.parse(calls[0].init.body ?? '{}')).toMatchObject({
++      prompt: 'a mug',
++      format: 'obj',
++    });
++    expect((res.output as { format: string }).format).toBe('obj');
++  });
++
++  it('rejects inputs missing prompt', async () => {
++    for (const exec of [imageGenerateExecutor, videoGenerateExecutor, generate3dExecutor]) {
++      const res = await exec({ not_prompt: 1 }, makeCtx({}));
++      expect(res.isError).toBe(true);
++    }
++  });
++});
+diff --git a/server/src/lib/tools/builtin/github.ts b/server/src/lib/tools/builtin/github.ts
+new file mode 100644
+index 0000000..bcd476c
+--- /dev/null
++++ b/server/src/lib/tools/builtin/github.ts
+@@ -0,0 +1,219 @@
++/**
++ * github.ts — builtin `github_request` (read) + `github_write` (mutate) tools.
++ *
++ * Thin passthrough to the GitHub REST API (https://api.github.com). Works
++ * unauthenticated (rate-limited); set `GITHUB_TOKEN` for normal quotas and
++ * write access. Split into two tools so the permission story stays clean:
++ *
++ *   github_request  GET-only   → default mode ALLOW (read-only, safe)
++ *   github_write    POST/PUT/PATCH/DELETE → default mode PROMPT (side effect)
++ *
++ * The response body is passed through as `data` — issues / PRs / repos all
++ * share this one pair of tools, keeping the registry small.
++ */
++
++import type { ToolSpec } from '../../tool-spec';
++import type { BuiltinToolExecutor, BuiltinToolContext } from './types';
++import { providerEnv, providerFetchJson } from './provider-http';
++
++const GITHUB_API_VERSION = '2022-11-28';
++
++// Path hygiene: must be a rooted absolute path on api.github.com. Rejects
++// protocol-relative ('//host') and control characters; the host itself is
++// fixed by the https://api.github.com prefix so no SSRF surface exists.
++const SAFE_PATH_RE = /^\/(?!\/)[A-Za-z0-9._~!$&'()*+,;=:@%/\-?]*$/;
++
++function resolveUrl(rawPath: string): string | null {
++  if (typeof rawPath !== 'string' || !SAFE_PATH_RE.test(rawPath)) return null;
++  try {
++    const url = new URL(`https://api.github.com${rawPath}`);
++    if (url.hostname !== 'api.github.com') return null;
++    return url.toString();
++  } catch {
++    return null;
++  }
++}
++
++function githubHeaders(env: Readonly<Record<string, string>>, accept?: string): Record<string, string> {
++  const headers: Record<string, string> = {
++    accept: accept ?? 'application/vnd.github+json',
++    'x-github-api-version': GITHUB_API_VERSION,
++  };
++  if (env.GITHUB_TOKEN) headers.authorization = `Bearer ${env.GITHUB_TOKEN}`;
++  return headers;
++}
++
++// ─── github_request (read-only) ─────────────────────────────────────────────
++
++export const githubRequestTool: ToolSpec = {
++  name: 'github_request',
++  description:
++    'Read from the GitHub REST API (GET only): repos, issues, pull requests, ' +
++    'code search, releases… Path is relative to https://api.github.com, e.g. ' +
++    '"/repos/owner/repo/issues". Optional GITHUB_TOKEN raises rate limits.',
++  input_schema: {
++    type: 'object',
++    properties: {
++      path: {
++        type: 'string',
++        description: "API path starting with '/', e.g. /repos/owner/repo/issues",
++      },
++      accept: {
++        type: 'string',
++        description: 'Optional Accept header override (e.g. raw media types).',
++      },
++    },
++    required: ['path'],
++    additionalProperties: false,
++  },
++  source: 'base',
++};
++
++interface GithubRequestInput {
++  path: string;
++  accept?: string;
++}
++
++function isGithubRequestInput(x: unknown): x is GithubRequestInput {
++  return typeof x === 'object' && x !== null && typeof (x as { path?: unknown }).path === 'string';
++}
++
++export const githubRequestExecutor: BuiltinToolExecutor = async (
++  input: unknown,
++  ctx: BuiltinToolContext,
++) => {
++  if (!isGithubRequestInput(input)) {
++    return { output: { error: "github_request: input must be { path: string, accept? }" }, isError: true };
++  }
++  const url = resolveUrl(input.path);
++  if (!url) {
++    return {
++      output: { error: `github_request: unsafe or invalid API path: ${input.path}` },
++      isError: true,
++    };
++  }
++
++  try {
++    const res = await providerFetchJson(
++      url,
++      { method: 'GET', headers: githubHeaders(providerEnv(ctx), input.accept) },
++      ctx,
++    );
++    return {
++      output: {
++        provider: 'github',
++        path: input.path,
++        status: res.status,
++        data: res.data,
++        ...(res.status === 403 ? { note: 'GitHub API rate limit or access restriction — set GITHUB_TOKEN if unset.' } : {}),
++      },
++      ...(res.status >= 400 ? { isError: true } : {}),
++    };
++  } catch (err) {
++    const msg = err instanceof Error ? err.message : String(err);
++    return { output: { error: `github_request failed: ${msg}` }, isError: true };
++  }
++};
++
++// ─── github_write (mutating) ────────────────────────────────────────────────
++
++export const githubWriteTool: ToolSpec = {
++  name: 'github_write',
++  description:
++    'Write to the GitHub REST API (POST/PUT/PATCH/DELETE): create or update ' +
++    'issues, comments, pull requests, files… Requires GITHUB_TOKEN. Path is ' +
++    'relative to https://api.github.com. Side-effecting: prompts for approval ' +
++    'unless explicitly allowed.',
++  input_schema: {
++    type: 'object',
++    properties: {
++      method: { type: 'string', enum: ['POST', 'PUT', 'PATCH', 'DELETE'] },
++      path: {
++        type: 'string',
++        description: "API path starting with '/', e.g. /repos/owner/repo/issues",
++      },
++      body: { description: 'Optional JSON request body.' },
++      accept: {
++        type: 'string',
++        description: 'Optional Accept header override (e.g. raw media types).',
++      },
++    },
++    required: ['method', 'path'],
++    additionalProperties: false,
++  },
++  source: 'base',
++};
++
++interface GithubWriteInput {
++  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE';
++  path: string;
++  body?: unknown;
++  accept?: string;
++}
++
++function isGithubWriteInput(x: unknown): x is GithubWriteInput {
++  if (typeof x !== 'object' || x === null) return false;
++  const o = x as Record<string, unknown>;
++  return (
++    (o.method === 'POST' || o.method === 'PUT' || o.method === 'PATCH' || o.method === 'DELETE') &&
++    typeof o.path === 'string'
++  );
++}
++
++export const githubWriteExecutor: BuiltinToolExecutor = async (
++  input: unknown,
++  ctx: BuiltinToolContext,
++) => {
++  if (!isGithubWriteInput(input)) {
++    return {
++      output: { error: "github_write: input must be { method: 'POST'|'PUT'|'PATCH'|'DELETE', path: string, body?, accept? }" },
++      isError: true,
++    };
++  }
++  const url = resolveUrl(input.path);
++  if (!url) {
++    return {
++      output: { error: `github_write: unsafe or invalid API path: ${input.path}` },
++      isError: true,
++    };
++  }
++
++  const env = providerEnv(ctx);
++  if (!env.GITHUB_TOKEN) {
++    return {
++      output: {
++        error: 'github_write: GITHUB_TOKEN is required for write operations (set it in the environment).',
++      },
++      isError: true,
++    };
++  }
++
++  const headers = githubHeaders(env, input.accept);
++  if (input.body !== undefined) headers['content-type'] = 'application/json';
++
++  try {
++    const res = await providerFetchJson(
++      url,
++      {
++        method: input.method,
++        headers,
++        body: input.body !== undefined ? JSON.stringify(input.body) : undefined,
++      },
++      ctx,
++    );
++    return {
++      output: {
++        provider: 'github',
++        method: input.method,
++        path: input.path,
++        status: res.status,
++        data: res.data,
++        ...(res.status === 403 ? { note: 'GitHub API rate limit or access restriction — check GITHUB_TOKEN scopes.' } : {}),
++      },
++      ...(res.status >= 400 ? { isError: true } : {}),
++    };
++  } catch (err) {
++    const msg = err instanceof Error ? err.message : String(err);
++    return { output: { error: `github_write failed: ${msg}` }, isError: true };
++  }
++};
+diff --git a/server/src/lib/tools/builtin/im-read.ts b/server/src/lib/tools/builtin/im-read.ts
+new file mode 100644
+index 0000000..e5f696c
+--- /dev/null
++++ b/server/src/lib/tools/builtin/im-read.ts
+@@ -0,0 +1,108 @@
++/**
++ * im-read.ts — builtin `im_read` tool (chat/messaging read access).
++ *
++ * Default mode ALLOW (read-only). Talks to a generic IM bridge so any
++ * messenger (WeCom / Feishu / DingTalk / Slack …) can be adapted server-side:
++ *   `SF_IM_API_BASE`   bridge base URL, contract:
++ *                        GET {base}/conversations?limit=N
++ *                          → { conversations: [...] }
++ *                        GET {base}/conversations/{id}/messages?limit=N
++ *                          → { messages: [...] }
++ *   `SF_IM_API_TOKEN`  optional Bearer token.
++ * Without SF_IM_API_BASE → structured stub listing nothing.
++ */
++
++import type { ToolSpec } from '../../tool-spec';
++import type { BuiltinToolExecutor, BuiltinToolContext } from './types';
++import { providerEnv, providerFetchJson, providerStub } from './provider-http';
++
++export const imReadTool: ToolSpec = {
++  name: 'im_read',
++  description:
++    'Read chat/messaging data via the configured IM bridge (SF_IM_API_BASE): ' +
++    'list conversations, or read the message history of one conversation. ' +
++    'Read-only. Returns a stub when no bridge is configured.',
++  input_schema: {
++    type: 'object',
++    properties: {
++      action: {
++        type: 'string',
++        enum: ['list_conversations', 'read_messages'],
++        description: 'list_conversations = chat list; read_messages = history of one chat.',
++      },
++      conversation_id: {
++        type: 'string',
++        description: 'Conversation id (required for read_messages).',
++      },
++      limit: { type: 'number', description: 'Max items to return (1-100, default 20).' },
++    },
++    required: ['action'],
++    additionalProperties: false,
++  },
++  source: 'base',
++};
++
++interface ImReadInput {
++  action: 'list_conversations' | 'read_messages';
++  conversation_id?: string;
++  limit?: number;
++}
++
++function isImReadInput(x: unknown): x is ImReadInput {
++  if (typeof x !== 'object' || x === null) return false;
++  const o = x as Record<string, unknown>;
++  return o.action === 'list_conversations' || o.action === 'read_messages';
++}
++
++export const imReadExecutor: BuiltinToolExecutor = async (
++  input: unknown,
++  ctx: BuiltinToolContext,
++) => {
++  if (!isImReadInput(input)) {
++    return {
++      output: { error: "im_read: input must be { action: 'list_conversations'|'read_messages', conversation_id?, limit? }" },
++      isError: true,
++    };
++  }
++  if (input.action === 'read_messages' && !input.conversation_id) {
++    return { output: { error: 'im_read: conversation_id is required for read_messages' }, isError: true };
++  }
++
++  const env = providerEnv(ctx);
++  const base = env.SF_IM_API_BASE?.replace(/\/+$/, '');
++  const limit = Math.max(1, Math.min(100, input.limit ?? 20));
++
++  if (!base) {
++    return providerStub(
++      'im_read',
++      'No IM bridge configured (set SF_IM_API_BASE + optional SF_IM_API_TOKEN; contract: GET /conversations, GET /conversations/{id}/messages). Nothing was read.',
++      { action: input.action },
++    );
++  }
++
++  const headers: Record<string, string> = { accept: 'application/json' };
++  if (env.SF_IM_API_TOKEN) headers.authorization = `Bearer ${env.SF_IM_API_TOKEN}`;
++
++  const url =
++    input.action === 'list_conversations'
++      ? `${base}/conversations?limit=${limit}`
++      : `${base}/conversations/${encodeURIComponent(input.conversation_id!)}/messages?limit=${limit}`;
++
++  try {
++    const res = await providerFetchJson(url, { method: 'GET', headers }, ctx);
++    if (res.status >= 400) {
++      return { output: { error: `im_read: bridge ${res.status}`, detail: res.data }, isError: true };
++    }
++    return {
++      output: {
++        provider: 'http',
++        action: input.action,
++        conversation_id: input.conversation_id,
++        data: res.data,
++      },
++    };
++  } catch (err) {
++    const msg = err instanceof Error ? err.message : String(err);
++    return { output: { error: `im_read failed: ${msg}` }, isError: true };
++  }
++};
+diff --git a/server/src/lib/tools/builtin/im-send.ts b/server/src/lib/tools/builtin/im-send.ts
+new file mode 100644
+index 0000000..ba41580
+--- /dev/null
++++ b/server/src/lib/tools/builtin/im-send.ts
+@@ -0,0 +1,98 @@
++/**
++ * im-send.ts — builtin `im_send` tool (chat/messaging send).
++ *
++ * Default mode PROMPT (external side effect — every send is user-approved
++ * unless a skill whitelist explicitly opts in via listed→allow semantics).
++ * Same SF_IM_API_BASE bridge as im_read.ts:
++ *   POST {base}/messages  { conversation_id, text }
++ * Optional `SF_IM_API_TOKEN` → Bearer auth. No bridge → stub, nothing sent.
++ */
++
++import type { ToolSpec } from '../../tool-spec';
++import type { BuiltinToolExecutor, BuiltinToolContext } from './types';
++import { providerEnv, providerFetchJson, providerStub } from './provider-http';
++
++export const imSendTool: ToolSpec = {
++  name: 'im_send',
++  description:
++    'Send a chat message via the configured IM bridge (SF_IM_API_BASE, POST /messages). ' +
++    'Sends to one conversation id. Returns a stub when no bridge is configured.',
++  input_schema: {
++    type: 'object',
++    properties: {
++      conversation_id: { type: 'string', description: 'Target conversation id.' },
++      text: { type: 'string', description: 'Message text to send.' },
++    },
++    required: ['conversation_id', 'text'],
++    additionalProperties: false,
++  },
++  source: 'base',
++};
++
++interface ImSendInput {
++  conversation_id: string;
++  text: string;
++}
++
++function isImSendInput(x: unknown): x is ImSendInput {
++  if (typeof x !== 'object' || x === null) return false;
++  const o = x as Record<string, unknown>;
++  return (
++    typeof o.conversation_id === 'string' &&
++    o.conversation_id.length > 0 &&
++    typeof o.text === 'string' &&
++    o.text.length > 0
++  );
++}
++
++export const imSendExecutor: BuiltinToolExecutor = async (
++  input: unknown,
++  ctx: BuiltinToolContext,
++) => {
++  if (!isImSendInput(input)) {
++    return {
++      output: { error: 'im_send: input must be { conversation_id: string, text: string }' },
++      isError: true,
++    };
++  }
++
++  const env = providerEnv(ctx);
++  const base = env.SF_IM_API_BASE?.replace(/\/+$/, '');
++
++  if (!base) {
++    return providerStub(
++      'im_send',
++      'No IM bridge configured (set SF_IM_API_BASE + optional SF_IM_API_TOKEN). Nothing was sent.',
++      { conversation_id: input.conversation_id },
++    );
++  }
++
++  const headers: Record<string, string> = { 'content-type': 'application/json' };
++  if (env.SF_IM_API_TOKEN) headers.authorization = `Bearer ${env.SF_IM_API_TOKEN}`;
++
++  try {
++    const res = await providerFetchJson(
++      `${base}/messages`,
++      {
++        method: 'POST',
++        headers,
++        body: JSON.stringify({ conversation_id: input.conversation_id, text: input.text }),
++      },
++      ctx,
++    );
++    if (res.status >= 400) {
++      return { output: { error: `im_send: bridge ${res.status}`, detail: res.data }, isError: true };
++    }
++    return {
++      output: {
++        provider: 'http',
++        ok: true,
++        conversation_id: input.conversation_id,
++        data: res.data,
++      },
++    };
++  } catch (err) {
++    const msg = err instanceof Error ? err.message : String(err);
++    return { output: { error: `im_send failed: ${msg}` }, isError: true };
++  }
++};
+diff --git a/server/src/lib/tools/builtin/image-generate.ts b/server/src/lib/tools/builtin/image-generate.ts
+new file mode 100644
+index 0000000..17f6bcd
+--- /dev/null
++++ b/server/src/lib/tools/builtin/image-generate.ts
+@@ -0,0 +1,101 @@
++/**
++ * image-generate.ts — builtin `image_generate` tool (text-to-image).
++ *
++ * Default mode ALLOW. Provider via env, OpenAI-compatible images endpoint:
++ *   `SF_IMAGE_API_BASE`  e.g. https://api.openai.com/v1  (POST {base}/images/generations)
++ *   `SF_IMAGE_API_KEY`   optional Bearer token
++ *   `SF_IMAGE_MODEL`     default 'gpt-image-1'
++ * No base configured → structured stub, nothing generated.
++ */
++
++import type { ToolSpec } from '../../tool-spec';
++import type { BuiltinToolExecutor, BuiltinToolContext } from './types';
++import { providerEnv, providerFetchJson, providerStub } from './provider-http';
++
++export const imageGenerateTool: ToolSpec = {
++  name: 'image_generate',
++  description:
++    'Generate images from a text prompt via the configured image provider ' +
++    '(SF_IMAGE_API_BASE, OpenAI-compatible /images/generations). Returns image ' +
++    'urls or base64 payloads. Returns a stub when no provider is configured.',
++  input_schema: {
++    type: 'object',
++    properties: {
++      prompt: { type: 'string', description: 'Text description of the image.' },
++      size: {
++        type: 'string',
++        description: "Optional size, e.g. '1024x1024', '1792x1024'.",
++      },
++      n: { type: 'number', description: 'Number of images (1-4, default 1).' },
++      model: { type: 'string', description: 'Override SF_IMAGE_MODEL for this call.' },
++    },
++    required: ['prompt'],
++    additionalProperties: false,
++  },
++  source: 'base',
++};
++
++interface ImageGenerateInput {
++  prompt: string;
++  size?: string;
++  n?: number;
++  model?: string;
++}
++
++function isImageGenerateInput(x: unknown): x is ImageGenerateInput {
++  return typeof x === 'object' && x !== null && typeof (x as { prompt?: unknown }).prompt === 'string';
++}
++
++export const imageGenerateExecutor: BuiltinToolExecutor = async (
++  input: unknown,
++  ctx: BuiltinToolContext,
++) => {
++  if (!isImageGenerateInput(input)) {
++    return { output: { error: 'image_generate: input must be { prompt: string, size?, n?, model? }' }, isError: true };
++  }
++
++  const env = providerEnv(ctx);
++  const base = env.SF_IMAGE_API_BASE?.replace(/\/+$/, '');
++  if (!base) {
++    return providerStub(
++      'image_generate',
++      'No image provider configured (set SF_IMAGE_API_BASE, optionally SF_IMAGE_API_KEY / SF_IMAGE_MODEL). No image was generated.',
++      { prompt: input.prompt },
++    );
++  }
++
++  const n = Math.max(1, Math.min(4, input.n ?? 1));
++  const headers: Record<string, string> = { 'content-type': 'application/json' };
++  if (env.SF_IMAGE_API_KEY) headers.authorization = `Bearer ${env.SF_IMAGE_API_KEY}`;
++
++  try {
++    const res = await providerFetchJson(
++      `${base}/images/generations`,
++      {
++        method: 'POST',
++        headers,
++        body: JSON.stringify({
++          model: input.model ?? env.SF_IMAGE_MODEL ?? 'gpt-image-1',
++          prompt: input.prompt,
++          n,
++          ...(input.size ? { size: input.size } : {}),
++        }),
++      },
++      ctx,
++    );
++    if (res.status >= 400) {
++      return { output: { error: `image_generate: provider ${res.status}`, detail: res.data }, isError: true };
++    }
++    const payload = res.data as { data?: unknown[] } | null;
++    return {
++      output: {
++        provider: 'http',
++        prompt: input.prompt,
++        images: Array.isArray(payload?.data) ? payload.data : res.data,
++      },
++    };
++  } catch (err) {
++    const msg = err instanceof Error ? err.message : String(err);
++    return { output: { error: `image_generate failed: ${msg}` }, isError: true };
++  }
++};
+diff --git a/server/src/lib/tools/builtin/index.ts b/server/src/lib/tools/builtin/index.ts
+index aab90f7..4fdb703 100644
+--- a/server/src/lib/tools/builtin/index.ts
++++ b/server/src/lib/tools/builtin/index.ts
+@@ -1,5 +1,10 @@
+ /**
+- * builtin/index.ts — Default registry for the 9 ConversationRuntime builtins.
++ * builtin/index.ts — Default registry for the 17 ConversationRuntime builtins.
++ *
++ * 2026-11-07 — WorkBuddy 平台能力补齐: +8 provider-backed platform tools
++ * (send_email / im_read / im_send / github_request / github_write /
++ * image_generate / video_generate / generate_3d), all following web-search's
++ * env-provider + stub contract (see provider-http.ts).
+  *
+  * Exported pieces:
+  *   - `builtinTools`                 ToolSpec[]    insertion-ordered list
+@@ -7,7 +12,7 @@
+  *   - `builtinDefaultModes`          Record<name, PermissionMode>
+  *   - `createBuiltinRegistry()`      factory returning a fresh ToolRegistry
+  *                                    seeded with all 9 ToolSpec entries.
+- *   - `registerBuiltinExecutors()`   register the 9 executors against Lane 1's
++ *   - `registerBuiltinExecutors()`   register the executors against Lane 1's
+  *                                    module-level executor registry. The
+  *                                    workspace + allowedTools context is
+  *                                    threaded via AsyncLocalStorage — the
+@@ -47,19 +52,38 @@ import { globFilesTool, globFilesExecutor } from './glob-files';
+ import { grepTool, grepExecutor } from './grep';
+ import { webSearchTool, webSearchExecutor } from './web-search';
+ import { fetchUrlTool, fetchUrlExecutor } from './fetch-url';
++import { imReadTool, imReadExecutor } from './im-read';
++import { githubRequestTool, githubRequestExecutor, githubWriteTool, githubWriteExecutor } from './github';
+ import { writeFileTool, writeFileExecutor } from './write-file';
+ import { editFileTool, editFileExecutor } from './edit-file';
++import { sendEmailTool, sendEmailExecutor } from './send-email';
++import { imSendTool, imSendExecutor } from './im-send';
++import { imageGenerateTool, imageGenerateExecutor } from './image-generate';
++import { videoGenerateTool, videoGenerateExecutor } from './video-generate';
++import { generate3dTool, generate3dExecutor } from './three-d-generate';
+ import { shellExecTool, shellExecExecutor } from './shell-exec';
+ 
+ export const builtinTools: ToolSpec[] = [
++  // read-tier (safe-by-default)
+   readFileTool,
+   listDirTool,
+   globFilesTool,
+   grepTool,
+   webSearchTool,
+   fetchUrlTool,
++  imReadTool,
++  githubRequestTool,
++  // write-tier
+   writeFileTool,
+   editFileTool,
++  sendEmailTool,
++  imSendTool,
++  githubWriteTool,
++  // generation-tier (costly providers)
++  imageGenerateTool,
++  videoGenerateTool,
++  generate3dTool,
++  // shell last
+   shellExecTool,
+ ];
+ 
+@@ -70,8 +94,16 @@ export const builtinExecutors: Record<string, BuiltinToolExecutor> = {
+   grep: grepExecutor,
+   web_search: webSearchExecutor,
+   fetch_url: fetchUrlExecutor,
++  im_read: imReadExecutor,
++  github_request: githubRequestExecutor,
+   write_file: writeFileExecutor,
+   edit_file: editFileExecutor,
++  send_email: sendEmailExecutor,
++  im_send: imSendExecutor,
++  github_write: githubWriteExecutor,
++  image_generate: imageGenerateExecutor,
++  video_generate: videoGenerateExecutor,
++  generate_3d: generate3dExecutor,
+   shell_exec: shellExecExecutor,
+ };
+ 
+@@ -89,8 +121,16 @@ export const builtinDefaultModes: Record<string, PermissionMode> = {
+   grep: 'allow',
+   web_search: 'allow',
+   fetch_url: 'allow',
++  im_read: 'allow',
++  github_request: 'allow',
+   write_file: 'prompt',
+   edit_file: 'prompt',
++  send_email: 'prompt',
++  im_send: 'prompt',
++  github_write: 'prompt',
++  image_generate: 'allow',
++  video_generate: 'prompt',
++  generate_3d: 'prompt',
+   shell_exec: 'deny',
+ };
+ 
+@@ -147,7 +187,7 @@ export function runWithBuiltinContext<T>(
+ }
+ 
+ /**
+- * Register all 9 builtin executors against Lane 1's tool-runner module
++ * Register all builtin executors against Lane 1's tool-runner module
+  * registry. Idempotent — safe to call multiple times (last write wins per
+  * tool name).
+  *
+diff --git a/server/src/lib/tools/builtin/provider-http.ts b/server/src/lib/tools/builtin/provider-http.ts
+new file mode 100644
+index 0000000..255e5b9
+--- /dev/null
++++ b/server/src/lib/tools/builtin/provider-http.ts
+@@ -0,0 +1,81 @@
++/**
++ * provider-http.ts — shared HTTP helpers for provider-backed builtin tools.
++ *
++ * The provider tools (send_email / im_read / im_send / github_* / *_generate)
++ * all follow the web-search.ts contract:
++ *   - provider selected via env vars at runtime, nothing bundled;
++ *   - unconfigured → structured stub so the LLM knows no real call happened;
++ *   - 30s timeout combined with the runtime's AbortSignal;
++ *   - network errors surfaced as `isError: true`, never thrown at the loop.
++ *
++ * This module holds the two bits of shared plumbing: the combined abort
++ * signal and a minimal JSON fetch that keeps every tool's input type free of
++ * DOM lib dependencies (server tsconfig may not include RequestInit).
++ */
++
++import type { BuiltinToolContext } from './types';
++
++export const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
++
++/** Combine the runtime signal with a hard timeout. */
++export function providerSignal(
++  ctx: BuiltinToolContext,
++  timeoutMs: number = DEFAULT_PROVIDER_TIMEOUT_MS,
++): AbortSignal {
++  return AbortSignal.any([ctx.signal, AbortSignal.timeout(timeoutMs)]);
++}
++
++export interface ProviderRequestInit {
++  method?: string;
++  headers?: Record<string, string>;
++  body?: string;
++}
++
++export interface ProviderJsonResponse {
++  status: number;
++  /** Parsed JSON body, or the raw text when the response is not JSON. */
++  data: unknown;
++  /** True when the response body was not valid JSON. */
++  nonJson: boolean;
++}
++
++/**
++ * Fetch `url` and parse the response. Does NOT throw on HTTP error status —
++ * the caller decides how to frame non-2xx. Throws only on network failure /
++ * abort (callers wrap in try/catch like web-search.ts does).
++ */
++export async function providerFetchJson(
++  url: string,
++  init: ProviderRequestInit,
++  ctx: BuiltinToolContext,
++  timeoutMs?: number,
++): Promise<ProviderJsonResponse> {
++  const signal = providerSignal(ctx, timeoutMs);
++  const res = await fetch(url, { ...init, signal });
++  const text = await res.text();
++  try {
++    return { status: res.status, data: JSON.parse(text), nonJson: false };
++  } catch {
++    return { status: res.status, data: text, nonJson: true };
++  }
++}
++
++/** Read the env override from ctx when present (tests), else process.env. */
++export function providerEnv(
++  ctx: BuiltinToolContext,
++): Readonly<Record<string, string>> {
++  return ctx.env ?? (process.env as Record<string, string>);
++}
++
++/** Standard "no provider configured" stub shared by every provider tool. */
++export function providerStub(tool: string, note: string, extra?: Record<string, unknown>) {
++  return {
++    output: {
++      provider: 'stub',
++      tool,
++      ok: false,
++      note,
++      ...extra,
++    },
++  };
++}
+diff --git a/server/src/lib/tools/builtin/send-email.ts b/server/src/lib/tools/builtin/send-email.ts
+new file mode 100644
+index 0000000..61c874b
+--- /dev/null
++++ b/server/src/lib/tools/builtin/send-email.ts
+@@ -0,0 +1,169 @@
++/**
++ * send-email.ts — builtin `send_email` tool.
++ *
++ * Default mode PROMPT (external side effect — every send is user-approved
++ * unless a skill whitelist explicitly opts in via listed→allow semantics).
++ *
++ * Provider selection (priority order), mirroring web-search.ts:
++ *   1. `RESEND_API_KEY`    — Resend HTTP API (https://api.resend.com/emails).
++ *                            Requires `SF_MAIL_FROM` as the from address.
++ *   2. `SF_MAIL_API_BASE`  — generic mail bridge: POST {base}/send with JSON
++ *                            { to, subject, text, html, attachments }.
++ *                            Optional `SF_MAIL_API_TOKEN` → Bearer auth.
++ *   3. (none)              — structured stub, no mail is sent.
++ */
++
++import type { ToolSpec } from '../../tool-spec';
++import type { BuiltinToolExecutor, BuiltinToolContext } from './types';
++import { providerEnv, providerFetchJson, providerStub } from './provider-http';
++
++export const sendEmailTool: ToolSpec = {
++  name: 'send_email',
++  description:
++    'Send an email. Provider is configured via RESEND_API_KEY (+SF_MAIL_FROM) or ' +
++    'SF_MAIL_API_BASE (generic bridge); without those configured returns a stub ' +
++    'and sends nothing. Attachments are base64-encoded.',
++  input_schema: {
++    type: 'object',
++    properties: {
++      to: {
++        oneOf: [
++          { type: 'string' },
++          { type: 'array', items: { type: 'string' } },
++        ],
++        description: 'Recipient address, or list of addresses.',
++      },
++      subject: { type: 'string', description: 'Email subject.' },
++      text: { type: 'string', description: 'Plain-text body.' },
++      html: { type: 'string', description: 'HTML body (optional).' },
++      attachments: {
++        type: 'array',
++        items: {
++          type: 'object',
++          properties: {
++            filename: { type: 'string' },
++            content: { type: 'string', description: 'Base64-encoded file content.' },
++          },
++          required: ['filename', 'content'],
++          additionalProperties: false,
++        },
++        description: 'Optional base64 attachments.',
++      },
++    },
++    required: ['to', 'subject'],
++    additionalProperties: false,
++  },
++  source: 'base',
++};
++
++interface MailAttachment {
++  filename: string;
++  content: string;
++}
++
++interface SendEmailInput {
++  to: string | string[];
++  subject: string;
++  text?: string;
++  html?: string;
++  attachments?: MailAttachment[];
++}
++
++function isSendEmailInput(x: unknown): x is SendEmailInput {
++  if (typeof x !== 'object' || x === null) return false;
++  const o = x as Record<string, unknown>;
++  const toOk =
++    typeof o.to === 'string' ||
++    (Array.isArray(o.to) && o.to.every((t) => typeof t === 'string' && t.length > 0));
++  return toOk && typeof o.subject === 'string' && o.subject.length > 0;
++}
++
++export const sendEmailExecutor: BuiltinToolExecutor = async (
++  input: unknown,
++  ctx: BuiltinToolContext,
++) => {
++  if (!isSendEmailInput(input)) {
++    return {
++      output: { error: 'send_email: input must be { to: string|string[], subject: string, text?, html?, attachments? }' },
++      isError: true,
++    };
++  }
++
++  const to = Array.isArray(input.to) ? input.to : [input.to];
++  const env = providerEnv(ctx);
++  const resendKey = env.RESEND_API_KEY;
++  const mailBase = env.SF_MAIL_API_BASE;
++
++  if (!resendKey && !mailBase) {
++    return providerStub(
++      'send_email',
++      'No mail provider configured (set RESEND_API_KEY + SF_MAIL_FROM, or SF_MAIL_API_BASE). No email was sent.',
++      { to, subject: input.subject },
++    );
++  }
++
++  try {
++    if (resendKey) {
++      const from = env.SF_MAIL_FROM;
++      if (!from) {
++        return {
++          output: {
++            error: 'send_email: RESEND_API_KEY is set but SF_MAIL_FROM (from address) is missing',
++          },
++          isError: true,
++        };
++      }
++      const res = await providerFetchJson(
++        'https://api.resend.com/emails',
++        {
++          method: 'POST',
++          headers: {
++            'content-type': 'application/json',
++            authorization: `Bearer ${resendKey}`,
++          },
++          body: JSON.stringify({
++            from,
++            to,
++            subject: input.subject,
++            text: input.text,
++            html: input.html,
++            attachments: input.attachments,
++          }),
++        },
++        ctx,
++      );
++      if (res.status >= 400) {
++        return { output: { error: `send_email: Resend ${res.status}`, detail: res.data }, isError: true };
++      }
++      const id = (res.data as { id?: string } | null)?.id;
++      return { output: { provider: 'resend', ok: true, id, to, subject: input.subject } };
++    }
++
++    // Generic mail bridge.
++    const base = mailBase!.replace(/\/+$/, '');
++    const headers: Record<string, string> = { 'content-type': 'application/json' };
++    if (env.SF_MAIL_API_TOKEN) headers.authorization = `Bearer ${env.SF_MAIL_API_TOKEN}`;
++    const res = await providerFetchJson(
++      `${base}/send`,
++      {
++        method: 'POST',
++        headers,
++        body: JSON.stringify({
++          to,
++          subject: input.subject,
++          text: input.text,
++          html: input.html,
++          attachments: input.attachments,
++        }),
++      },
++      ctx,
++    );
++    if (res.status >= 400) {
++      return { output: { error: `send_email: bridge ${res.status}`, detail: res.data }, isError: true };
++    }
++    return { output: { provider: 'http', ok: true, to, subject: input.subject, data: res.data } };
++  } catch (err) {
++    const msg = err instanceof Error ? err.message : String(err);
++    return { output: { error: `send_email failed: ${msg}` }, isError: true };
++  }
++};
+diff --git a/server/src/lib/tools/builtin/three-d-generate.ts b/server/src/lib/tools/builtin/three-d-generate.ts
+new file mode 100644
+index 0000000..c321015
+--- /dev/null
++++ b/server/src/lib/tools/builtin/three-d-generate.ts
+@@ -0,0 +1,101 @@
++/**
++ * three-d-generate.ts — builtin `generate_3d` tool (text/image-to-3D model).
++ *
++ * Default mode PROMPT (expensive → explicit approval unless a skill whitelist
++ * opts in). Provider via env:
++ *   `SF_3D_API_BASE`  POST {base}/generations  { prompt, format }
++ *   `SF_3D_API_KEY`   optional Bearer token
++ *   `SF_3D_MODEL`     optional model id
++ * Response body passed through as `result` (usually a model file url or
++ * job handle). No base → structured stub.
++ */
++
++import type { ToolSpec } from '../../tool-spec';
++import type { BuiltinToolExecutor, BuiltinToolContext } from './types';
++import { providerEnv, providerFetchJson, providerStub } from './provider-http';
++
++export const generate3dTool: ToolSpec = {
++  name: 'generate_3d',
++  description:
++    'Generate a 3D model from a text prompt via the configured 3D provider ' +
++    '(SF_3D_API_BASE, POST /generations). Returns the provider result (model ' +
++    'file url / job handle). Side-effecting (costly): prompts for approval ' +
++    'unless allowed. Returns a stub when no provider is configured.',
++  input_schema: {
++    type: 'object',
++    properties: {
++      prompt: { type: 'string', description: 'Text description of the 3D asset.' },
++      format: {
++        type: 'string',
++        enum: ['glb', 'obj', 'usdz', 'fbx'],
++        description: 'Requested model format (default glb).',
++      },
++      model: { type: 'string', description: 'Override SF_3D_MODEL for this call.' },
++    },
++    required: ['prompt'],
++    additionalProperties: false,
++  },
++  source: 'base',
++};
++
++interface Generate3dInput {
++  prompt: string;
++  format?: 'glb' | 'obj' | 'usdz' | 'fbx';
++  model?: string;
++}
++
++function isGenerate3dInput(x: unknown): x is Generate3dInput {
++  return typeof x === 'object' && x !== null && typeof (x as { prompt?: unknown }).prompt === 'string';
++}
++
++export const generate3dExecutor: BuiltinToolExecutor = async (
++  input: unknown,
++  ctx: BuiltinToolContext,
++) => {
++  if (!isGenerate3dInput(input)) {
++    return { output: { error: 'generate_3d: input must be { prompt: string, format?, model? }' }, isError: true };
++  }
++
++  const env = providerEnv(ctx);
++  const base = env.SF_3D_API_BASE?.replace(/\/+$/, '');
++  if (!base) {
++    return providerStub(
++      'generate_3d',
++      'No 3D provider configured (set SF_3D_API_BASE, optionally SF_3D_API_KEY / SF_3D_MODEL). No model was generated.',
++      { prompt: input.prompt },
++    );
++  }
++
++  const headers: Record<string, string> = { 'content-type': 'application/json' };
++  if (env.SF_3D_API_KEY) headers.authorization = `Bearer ${env.SF_3D_API_KEY}`;
++
++  try {
++    const res = await providerFetchJson(
++      `${base}/generations`,
++      {
++        method: 'POST',
++        headers,
++        body: JSON.stringify({
++          model: input.model ?? env.SF_3D_MODEL,
++          prompt: input.prompt,
++          format: input.format ?? 'glb',
++        }),
++      },
++      ctx,
++    );
++    if (res.status >= 400) {
++      return { output: { error: `generate_3d: provider ${res.status}`, detail: res.data }, isError: true };
++    }
++    return {
++      output: {
++        provider: 'http',
++        prompt: input.prompt,
++        format: input.format ?? 'glb',
++        result: res.data,
++      },
++    };
++  } catch (err) {
++    const msg = err instanceof Error ? err.message : String(err);
++    return { output: { error: `generate_3d failed: ${msg}` }, isError: true };
++  }
++};
+diff --git a/server/src/lib/tools/builtin/video-generate.ts b/server/src/lib/tools/builtin/video-generate.ts
+new file mode 100644
+index 0000000..65ace36
+--- /dev/null
++++ b/server/src/lib/tools/builtin/video-generate.ts
+@@ -0,0 +1,101 @@
++/**
++ * video-generate.ts — builtin `video_generate` tool (text-to-video).
++ *
++ * Default mode PROMPT (expensive + long-running → explicit approval unless a
++ * skill whitelist opts in). Provider via env:
++ *   `SF_VIDEO_API_BASE`  POST {base}/generations  { model, prompt, duration, size }
++ *   `SF_VIDEO_API_KEY`   optional Bearer token
++ *   `SF_VIDEO_MODEL`     provider model id
++ * Providers differ wildly (sync result vs async job), so the response body is
++ * passed through as `result` — an async provider simply returns its job id
++ * here and the caller polls with fetch_url. No base → structured stub.
++ */
++
++import type { ToolSpec } from '../../tool-spec';
++import type { BuiltinToolExecutor, BuiltinToolContext } from './types';
++import { providerEnv, providerFetchJson, providerStub } from './provider-http';
++
++export const videoGenerateTool: ToolSpec = {
++  name: 'video_generate',
++  description:
++    'Generate a short video from a text prompt via the configured video provider ' +
++    '(SF_VIDEO_API_BASE, POST /generations). Returns the provider result or job ' +
++    'handle. Side-effecting (costly): prompts for approval unless allowed. ' +
++    'Returns a stub when no provider is configured.',
++  input_schema: {
++    type: 'object',
++    properties: {
++      prompt: { type: 'string', description: 'Text description of the video.' },
++      duration: { type: 'number', description: 'Requested duration in seconds (provider-dependent).' },
++      size: { type: 'string', description: "Requested resolution, e.g. '1280x720'." },
++      model: { type: 'string', description: 'Override SF_VIDEO_MODEL for this call.' },
++    },
++    required: ['prompt'],
++    additionalProperties: false,
++  },
++  source: 'base',
++};
++
++interface VideoGenerateInput {
++  prompt: string;
++  duration?: number;
++  size?: string;
++  model?: string;
++}
++
++function isVideoGenerateInput(x: unknown): x is VideoGenerateInput {
++  return typeof x === 'object' && x !== null && typeof (x as { prompt?: unknown }).prompt === 'string';
++}
++
++export const videoGenerateExecutor: BuiltinToolExecutor = async (
++  input: unknown,
++  ctx: BuiltinToolContext,
++) => {
++  if (!isVideoGenerateInput(input)) {
++    return { output: { error: 'video_generate: input must be { prompt: string, duration?, size?, model? }' }, isError: true };
++  }
++
++  const env = providerEnv(ctx);
++  const base = env.SF_VIDEO_API_BASE?.replace(/\/+$/, '');
++  if (!base) {
++    return providerStub(
++      'video_generate',
++      'No video provider configured (set SF_VIDEO_API_BASE, optionally SF_VIDEO_API_KEY / SF_VIDEO_MODEL). No video was generated.',
++      { prompt: input.prompt },
++    );
++  }
++
++  const headers: Record<string, string> = { 'content-type': 'application/json' };
++  if (env.SF_VIDEO_API_KEY) headers.authorization = `Bearer ${env.SF_VIDEO_API_KEY}`;
++
++  try {
++    const res = await providerFetchJson(
++      `${base}/generations`,
++      {
++        method: 'POST',
++        headers,
++        body: JSON.stringify({
++          model: input.model ?? env.SF_VIDEO_MODEL,
++          prompt: input.prompt,
++          ...(input.duration !== undefined ? { duration: input.duration } : {}),
++          ...(input.size ? { size: input.size } : {}),
++        }),
++      },
++      ctx,
++    );
++    if (res.status >= 400) {
++      return { output: { error: `video_generate: provider ${res.status}`, detail: res.data }, isError: true };
++    }
++    return {
++      output: {
++        provider: 'http',
++        prompt: input.prompt,
++        result: res.data,
++        note: 'Async providers return a job handle in `result`; poll the provider endpoint (e.g. with fetch_url) for completion.',
++      },
++    };
++  } catch (err) {
++    const msg = err instanceof Error ? err.message : String(err);
++    return { output: { error: `video_generate failed: ${msg}` }, isError: true };
++  }
++};
+diff --git a/server/src/lib/tools/builtin/web-search.ts b/server/src/lib/tools/builtin/web-search.ts
+index d1ac769..52d1e63 100644
+--- a/server/src/lib/tools/builtin/web-search.ts
++++ b/server/src/lib/tools/builtin/web-search.ts
+@@ -4,15 +4,24 @@
+  * Default mode ALLOW. The provider is selected via env vars at runtime — no
+  * provider is bundled. Supported (in priority order):
+  *
+- *   1. `SERPAPI_API_KEY`   — uses serpapi.com /search.json
+- *   2. `TAVILY_API_KEY`    — uses api.tavily.com /search
++ *   1. `SERPAPI_API_KEY`   — uses serpapi.com /search.json (Google engine;
++ *                            `source: 'wechat'` switches to the WeChat
++ *                            公众号 engine).
++ *   2. `TAVILY_API_KEY`    — uses api.tavily.com /search (`days` recency
++ *                            filter; no WeChat engine — falls back to web).
+  *   3. (none)              — returns a structured "no provider configured"
+  *                            stub. Lets local-dev runs proceed without
+  *                            burning an API key; the LLM gets a clear signal
+  *                            it should not pretend it ran a real search.
+  *
+  * Output shape is provider-agnostic:
+- *   { provider, query, results: [{ title, url, snippet }], count }
++ *   { provider, query, results: [{ title, url, snippet }], count, note? }
++ *
++ * Optional filters (all backward compatible):
++ *   - `recency`  day | week | month | year → SerpAPI tbs=qdr:d|w|m|y,
++ *                Tavily days=1|7|30|365. WeChat engine ignores recency.
++ *   - `source`   'web' (default) | 'wechat' (微信公众号). Tavily has no
++ *                WeChat engine → results fall back to web with a note.
+  *
+  * 30s timeout. Network errors surface as `isError: true` rather than throw
+  * so the conversation loop can continue.
+@@ -24,14 +33,26 @@ import type { BuiltinToolExecutor, BuiltinToolContext } from './types';
+ export const webSearchTool: ToolSpec = {
+   name: 'web_search',
+   description:
+-    'Search the public web. Returns up to 10 results with title, URL, and snippet. ' +
+-    'Provider is configured via SERPAPI_API_KEY or TAVILY_API_KEY env vars; ' +
+-    'without those configured returns a stub response.',
++    'Search the public web (or WeChat 公众号 articles via source: "wechat"). ' +
++    'Returns up to 10 results with title, URL, and snippet. Optional recency ' +
++    'filter: day / week / month / year. Provider is configured via ' +
++    'SERPAPI_API_KEY or TAVILY_API_KEY env vars; without those configured ' +
++    'returns a stub response.',
+   input_schema: {
+     type: 'object',
+     properties: {
+       query: { type: 'string', description: 'Search query string.' },
+       limit: { type: 'number', description: 'Max results (1-10, default 5).' },
++      recency: {
++        type: 'string',
++        enum: ['day', 'week', 'month', 'year'],
++        description: 'Only return results from the last day/week/month/year.',
++      },
++      source: {
++        type: 'string',
++        enum: ['web', 'wechat'],
++        description: "'web' = general web search (default); 'wechat' = WeChat 公众号 articles (SerpAPI only).",
++      },
+     },
+     required: ['query'],
+     additionalProperties: false,
+@@ -39,9 +60,13 @@ export const webSearchTool: ToolSpec = {
+   source: 'base',
+ };
+ 
++type Recency = 'day' | 'week' | 'month' | 'year';
++
+ interface WebSearchInput {
+   query: string;
+   limit?: number;
++  recency?: Recency;
++  source?: 'web' | 'wechat';
+ }
+ 
+ function isWebSearchInput(x: unknown): x is WebSearchInput {
+@@ -58,24 +83,66 @@ interface SearchResult {
+   snippet: string;
+ }
+ 
+-async function searchSerpAPI(apiKey: string, q: string, limit: number, signal: AbortSignal): Promise<SearchResult[]> {
+-  const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(q)}&num=${limit}&api_key=${encodeURIComponent(apiKey)}`;
+-  const res = await fetch(url, { signal });
++const SERPAPI_TBS: Record<Recency, string> = {
++  day: 'qdr:d',
++  week: 'qdr:w',
++  month: 'qdr:m',
++  year: 'qdr:y',
++};
++
++const TAVILY_DAYS: Record<Recency, number> = {
++  day: 1,
++  week: 7,
++  month: 30,
++  year: 365,
++};
++
++async function searchSerpAPI(
++  apiKey: string,
++  q: string,
++  limit: number,
++  recency: Recency | undefined,
++  wechat: boolean,
++  signal: AbortSignal,
++): Promise<SearchResult[]> {
++  const params = new URLSearchParams();
++  params.set('engine', wechat ? 'wechat' : 'google');
++  params.set('q', q);
++  if (!wechat) params.set('num', String(limit));
++  if (recency && !wechat) params.set('tbs', SERPAPI_TBS[recency]);
++  params.set('api_key', apiKey);
++  const res = await fetch(`https://serpapi.com/search.json?${params.toString()}`, { signal });
+   if (!res.ok) throw new Error(`SerpAPI ${res.status}`);
+-  const json = (await res.json()) as { organic_results?: Array<{ title?: string; link?: string; snippet?: string }> };
+-  const items = json.organic_results ?? [];
++  const json = (await res.json()) as {
++    organic_results?: Array<{ title?: string; link?: string; snippet?: string }>;
++    // WeChat engine returns `wechat_results` (articles) with slightly
++    // different field names; normalize below.
++    wechat_results?: Array<{ title?: string; link?: string; snippet?: string; url?: string }>;
++  };
++  const items = (wechat ? json.wechat_results ?? [] : json.organic_results ?? []);
+   return items.slice(0, limit).map((r) => ({
+     title: r.title ?? '',
+-    url: r.link ?? '',
++    url: r.link ?? (r as { url?: string }).url ?? '',
+     snippet: r.snippet ?? '',
+   }));
+ }
+ 
+-async function searchTavily(apiKey: string, q: string, limit: number, signal: AbortSignal): Promise<SearchResult[]> {
++async function searchTavily(
++  apiKey: string,
++  q: string,
++  limit: number,
++  recency: Recency | undefined,
++  signal: AbortSignal,
++): Promise<SearchResult[]> {
+   const res = await fetch('https://api.tavily.com/search', {
+     method: 'POST',
+     headers: { 'content-type': 'application/json' },
+-    body: JSON.stringify({ api_key: apiKey, query: q, max_results: limit }),
++    body: JSON.stringify({
++      api_key: apiKey,
++      query: q,
++      max_results: limit,
++      ...(recency ? { days: TAVILY_DAYS[recency] } : {}),
++    }),
+     signal,
+   });
+   if (!res.ok) throw new Error(`Tavily ${res.status}`);
+@@ -93,7 +160,7 @@ export const webSearchExecutor: BuiltinToolExecutor = async (
+   ctx: BuiltinToolContext,
+ ) => {
+   if (!isWebSearchInput(input)) {
+-    return { output: { error: 'web_search: input must be { query: string, limit?: number }' }, isError: true };
++    return { output: { error: 'web_search: input must be { query: string, limit?, recency?, source? }' }, isError: true };
+   }
+ 
+   const limit = Math.max(1, Math.min(10, input.limit ?? 5));
+@@ -114,16 +181,33 @@ export const webSearchExecutor: BuiltinToolExecutor = async (
+     };
+   }
+ 
++  // WeChat 公众号 search is a SerpAPI-only engine. With Tavily we fall back
++  // to general web results and say so, rather than failing the turn.
++  const wantWechat = input.source === 'wechat';
++  const wechat = wantWechat && Boolean(serp);
++  const notes: string[] = [];
++  if (wantWechat && !serp) {
++    notes.push('WeChat 公众号 search requires SERPAPI_API_KEY; fell back to general web results.');
++  }
++
+   const timeout = AbortSignal.timeout(30_000);
+   const combined = AbortSignal.any([ctx.signal, timeout]);
+ 
+   try {
+     const provider = serp ? 'serpapi' : 'tavily';
+     const results = serp
+-      ? await searchSerpAPI(serp, input.query, limit, combined)
+-      : await searchTavily(tavily!, input.query, limit, combined);
++      ? await searchSerpAPI(serp, input.query, limit, input.recency, wechat, combined)
++      : await searchTavily(tavily!, input.query, limit, input.recency, combined);
+     return {
+-      output: { provider, query: input.query, count: results.length, results },
++      output: {
++        provider,
++        query: input.query,
++        source: wechat ? 'wechat' : 'web',
++        ...(input.recency ? { recency: input.recency } : {}),
++        count: results.length,
++        results,
++        ...(notes.length ? { note: notes.join(' ') } : {}),
++      },
+     };
+   } catch (err) {
+     const msg = err instanceof Error ? err.message : String(err);
+diff --git a/shadowflow/runtime/tool_registry.py b/shadowflow/runtime/tool_registry.py
+index 871054b..93ad796 100644
+--- a/shadowflow/runtime/tool_registry.py
++++ b/shadowflow/runtime/tool_registry.py
+@@ -78,6 +78,83 @@ BUILTIN_TOOLS: List[Dict[str, Any]] = [
+         "credentials_required": False,
+         "boss_only": True,
+     },
++    # --- WorkBuddy 平台能力镜像 (2026-11-07) ---
++    # Names match the Node ConversationRuntime builtins 1:1
++    # (server/src/lib/tools/builtin/). credentials_required reflects whether a
++    # real provider call needs env credentials; tools still return a
++    # structured stub when unconfigured.
++    {
++        "tool_id": "builtin:send_email",
++        "name": "send_email",
++        "type": "builtin",
++        "description": "Send an email via Resend or a generic mail bridge (RESEND_API_KEY / SF_MAIL_API_BASE).",
++        "version": "1.0",
++        "icon": "✉️",
++        "credentials_required": True,
++    },
++    {
++        "tool_id": "builtin:im_read",
++        "name": "im_read",
++        "type": "builtin",
++        "description": "Read chat/messaging data via the IM bridge (SF_IM_API_BASE): list conversations, read history.",
++        "version": "1.0",
++        "icon": "💬",
++        "credentials_required": True,
++    },
++    {
++        "tool_id": "builtin:im_send",
++        "name": "im_send",
++        "type": "builtin",
++        "description": "Send a chat message via the IM bridge (SF_IM_API_BASE).",
++        "version": "1.0",
++        "icon": "📨",
++        "credentials_required": True,
++    },
++    {
++        "tool_id": "builtin:github_request",
++        "name": "github_request",
++        "type": "builtin",
++        "description": "Read from the GitHub REST API (GET): repos, issues, pull requests, search.",
++        "version": "1.0",
++        "icon": "🐙",
++        "credentials_required": False,
++    },
++    {
++        "tool_id": "builtin:github_write",
++        "name": "github_write",
++        "type": "builtin",
++        "description": "Write to the GitHub REST API (POST/PUT/PATCH/DELETE): issues, comments, PRs. Requires GITHUB_TOKEN.",
++        "version": "1.0",
++        "icon": "✍️",
++        "credentials_required": True,
++    },
++    {
++        "tool_id": "builtin:image_generate",
++        "name": "image_generate",
++        "type": "builtin",
++        "description": "Generate images from a text prompt (SF_IMAGE_API_BASE, OpenAI-compatible).",
++        "version": "1.0",
++        "icon": "🎨",
++        "credentials_required": True,
++    },
++    {
++        "tool_id": "builtin:video_generate",
++        "name": "video_generate",
++        "type": "builtin",
++        "description": "Generate a short video from a text prompt (SF_VIDEO_API_BASE).",
++        "version": "1.0",
++        "icon": "🎬",
++        "credentials_required": True,
++    },
++    {
++        "tool_id": "builtin:generate_3d",
++        "name": "generate_3d",
++        "type": "builtin",
++        "description": "Generate a 3D model from a text prompt (SF_3D_API_BASE).",
++        "version": "1.0",
++        "icon": "🧊",
++        "credentials_required": True,
++    },
+ ]
+ 
+ 

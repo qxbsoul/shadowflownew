@@ -1,0 +1,27 @@
+
+> shadowflow-server@1.0.0 test:fixtures
+> tsx ../tests/sse-parser-fixture.test.ts
+
+
+=== SSE parser fixture tests ===
+
+claude-stream-json (nested verbose envelope):
+  ✓ parser did not throw on real --verbose stream
+  ✓ emitted ≥ 1 event (got 4)
+  ✓ final synthetic complete event emitted
+  ✓ nested text_delta path actually accumulated (redirect=/editor?session=probe-claude)
+
+codex-stream-json (response.output_text.delta):
+  ✓ parser did not throw on real codex --stream output
+  ✓ emitted ≥ 1 event (got 3)
+  ✓ final synthetic complete event emitted
+  ✓ delta path actually accumulated (redirect=/editor?session=probe-codex)
+
+gh-copilot (plain text + synthetic step):
+  ✓ parser did not throw on real gh copilot output
+  ✓ emitted synthetic running+done assemble steps (got 2)
+  ✓ final synthetic complete event emitted
+  ✓ plain-text buffer was actually fed to parseAndExtract (redirect=/editor?session=probe-gh)
+
+
+Result: 12 passed, 0 failed

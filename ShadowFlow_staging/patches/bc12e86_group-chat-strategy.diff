@@ -1,0 +1,1620 @@
+diff --git a/server/src/lib/__tests__/chat-strategy.test.ts b/server/src/lib/__tests__/chat-strategy.test.ts
+new file mode 100644
+index 0000000..cf63041
+--- /dev/null
++++ b/server/src/lib/__tests__/chat-strategy.test.ts
+@@ -0,0 +1,272 @@
++/**
++ * chat-strategy.test.ts — 群聊意图识别 + 策略矩阵纯函数单测（2026-11-07）。
++ *
++ * 覆盖（全部离线、零 IO）：
++ *   - classifyChatIntent 优先级（寒暄 > 讨论 > 任务 > 问答 > 兜底任务）；
++ *   - scoreAgentFit 专长打分 / topAgents 稳定排序；
++ *   - splitTaskClauses 子句切分（句读切 + 逗号退化切、顿号不切）；
++ *   - heuristicPlan 策略矩阵全矩阵（solo/expert/pipeline/parallel/
++ *     roundtable/all-hands + 无信号不广播）；
++ *   - mentionPlan / casualPlan / allHandsPlan 单独计划构造；
++ *   - describePlan 派发卡 reason 文案。
++ *
++ * Run:
++ *   npx vitest run --config vitest.server.config.ts server/src/lib/__tests__/chat-strategy.test.ts
++ */
++import { describe, expect, it } from 'vitest';
++import {
++  allHandsPlan,
++  casualPlan,
++  classifyChatIntent,
++  describePlan,
++  heuristicPlan,
++  mentionPlan,
++  scoreAgentFit,
++  splitTaskClauses,
++  topAgents,
++  type ChatPlan,
++  type StrategyAgent,
++} from '../chat-strategy';
++
++/** 四工种花名册：产品 / 开发 / 设计 / 运营（专长词组互不重叠）。 */
++const AGENTS: StrategyAgent[] = [
++  { id: 'pm', name: '策划喵', soul: '产品 需求 用户故事 路线图' },
++  { id: 'dev', name: '码农鸡', soul: '开发 代码 后端 接口 数据库 sql 性能 bug 修复' },
++  { id: 'design', name: '设计鹅', soul: '设计 ui 界面 海报 配色' },
++  { id: 'ops', name: '运营鹅', soul: '运营 发布 推广 增长' },
++];
++const nameOf = (id: string): string => AGENTS.find((a) => a.id === id)?.name ?? id;
++
++// ── 意图分类 ────────────────────────────────────────────────────────────────
++
++describe('classifyChatIntent — 意图优先级', () => {
++  it('整句寒暄 → casual', () => {
++    expect(classifyChatIntent('hi')).toMatchObject({ intent: 'casual', signal: 'casual-line' });
++  });
++
++  it('讨论信号优先于任务词（「帮我选」是征求意见不是派活）', () => {
++    const r = classifyChatIntent('帮我选 A 还是 B');
++    expect(r.intent).toBe('discussion');
++    expect(r.signal).toBe('帮我选');
++  });
++
++  it('强任务动词 → task', () => {
++    const r = classifyChatIntent('帮我写个脚本');
++    expect(r.intent).toBe('task');
++    expect(r.signal).toBe('帮我');
++  });
++
++  it('问句（带 ? 或短文本）→ question', () => {
++    const r = classifyChatIntent('SQL 查询慢是什么原因？');
++    expect(r.intent).toBe('question');
++    expect(r.signal).toBe('什么');
++  });
++
++  it('无任何信号 → 兜底 task（signal=fallback）', () => {
++    expect(classifyChatIntent('登录页白屏')).toMatchObject({ intent: 'task', signal: 'fallback' });
++  });
++
++  it('空文本 → task（signal=empty）', () => {
++    expect(classifyChatIntent('')).toMatchObject({ intent: 'task', signal: 'empty' });
++  });
++});
++
++// ── 专长打分 ────────────────────────────────────────────────────────────────
++
++describe('scoreAgentFit / topAgents — 专长匹配', () => {
++  it('领域词组同组命中 → 对口者得分更高', () => {
++    const text = '帮我修复登录接口的 bug';
++    expect(scoreAgentFit(text, AGENTS[1]!)).toBeGreaterThan(scoreAgentFit(text, AGENTS[2]!));
++  });
++
++  it('名字出现在消息 → 加分（≥4）', () => {
++    expect(scoreAgentFit('让码农鸡看一下', AGENTS[1]!)).toBeGreaterThanOrEqual(4);
++    expect(scoreAgentFit('让码农鸡看一下', AGENTS[1]!)).toBeGreaterThan(
++      scoreAgentFit('让码农鸡看一下', AGENTS[0]!),
++    );
++  });
++
++  it('空文本 / 空简介 → 0 分', () => {
++    expect(scoreAgentFit('', AGENTS[0]!)).toBe(0);
++    expect(scoreAgentFit('随便聊聊', { id: 'x', name: '某人' })).toBe(0);
++  });
++
++  it('全体 0 分时 topAgents 按花名册顺序（稳定排序）', () => {
++    const picks = topAgents('登录页白屏', AGENTS, 2);
++    expect(picks.map((a) => a.id)).toEqual(['pm', 'dev']);
++  });
++});
++
++// ── 子句切分 ────────────────────────────────────────────────────────────────
++
++describe('splitTaskClauses — 工单粒度切分', () => {
++  it('句读（。！？）切多段', () => {
++    expect(splitTaskClauses('第一件事。第二件事！第三件事？')).toEqual([
++      '第一件事',
++      '第二件事',
++      '第三件事',
++    ]);
++  });
++
++  it('单句且 >16 字 → 退化逗号切（先…然后 → 2 段）', () => {
++    expect(splitTaskClauses('先帮我整理需求文档，然后实现登录接口')).toEqual([
++      '先帮我整理需求文档',
++      '然后实现登录接口',
++    ]);
++  });
++
++  it('短句逗号不切', () => {
++    expect(splitTaskClauses('短句，不切')).toEqual(['短句，不切']);
++  });
++
++  it('顿号不切（并列宾语保持一张工单）', () => {
++    expect(splitTaskClauses('帮我买苹果、香蕉、橙子等水果一共三斤吧')).toEqual([
++      '帮我买苹果、香蕉、橙子等水果一共三斤吧',
++    ]);
++  });
++});
++
++// ── 策略矩阵（heuristicPlan 全矩阵）────────────────────────────────────────
++
++describe('heuristicPlan — 策略矩阵', () => {
++  it('寒暄 → solo：成员首位单人接话', () => {
++    // 寒暄分支委托 casualPlan，source 继承 'casual'（describePlan 对 casual 不加来源注脚）。
++    const plan = heuristicPlan('hi', AGENTS);
++    expect(plan).toMatchObject({ intent: 'casual', strategy: 'solo', source: 'casual' });
++    expect(plan.tasks.map((t) => t.agentId)).toEqual(['pm']);
++  });
++
++  it('问答 → expert：最对口 1 人应答（不广播）', () => {
++    const plan = heuristicPlan('SQL 查询慢是什么原因？', AGENTS);
++    expect(plan).toMatchObject({ intent: 'question', strategy: 'expert' });
++    expect(plan.tasks).toHaveLength(1);
++    expect(plan.tasks[0]!.agentId).toBe('dev');
++    expect(plan.tasks[0]!.title).toBe('应答');
++  });
++
++  it('多子句有先后词 → pipeline：链式 depends_on + 自包含 prompt', () => {
++    const text = '先帮我整理需求文档，然后实现登录接口';
++    const plan = heuristicPlan(text, AGENTS);
++    expect(plan.strategy).toBe('pipeline');
++    expect(plan.tasks.map((t) => t.agentId)).toEqual(['pm', 'dev']);
++    expect(plan.tasks[0]!.depends_on).toBeUndefined();
++    expect(plan.tasks[1]!.depends_on).toEqual(['pm']);
++    // 每人 prompt = 自己的子句 + 整体需求上下文（自包含，不写「见上文」）。
++    expect(plan.tasks[0]!.prompt).toContain('先帮我整理需求文档');
++    expect(plan.tasks[0]!.prompt).toContain(`整体需求：${text}`);
++    expect(plan.tasks[1]!.prompt).toContain('然后实现登录接口');
++    expect(plan.tasks[1]!.prompt).toContain(`整体需求：${text}`);
++  });
++
++  it('多子句无先后词 → parallel：互相独立无依赖', () => {
++    // 句长 >16 字才触发逗号退化切分（splitTaskClauses 门槛），故用长句。
++    const plan = heuristicPlan('帮我整理一下需求文档，帮我设计一张活动海报', AGENTS);
++    expect(plan.strategy).toBe('parallel');
++    expect(plan.tasks.map((t) => t.agentId)).toEqual(['pm', 'design']);
++    for (const t of plan.tasks) expect(t.depends_on).toBeUndefined();
++  });
++
++  it('讨论 → roundtable：2-3 人给观点（不是全员）', () => {
++    const plan = heuristicPlan('帮我选 A 还是 B', AGENTS);
++    expect(plan).toMatchObject({ intent: 'discussion', strategy: 'roundtable' });
++    expect(plan.tasks).toHaveLength(3);
++    // 全 0 分稳定取花名册前三；运营鹅（第 4 位）不参与。
++    expect(plan.tasks.map((t) => t.agentId)).toEqual(['pm', 'dev', 'design']);
++    expect(plan.tasks[0]!.prompt).toContain('观点');
++  });
++
++  it('全体号召（大家/各位/干活）→ all-hands：全员参与', () => {
++    const plan = heuristicPlan('大家好，开始干活', AGENTS);
++    expect(plan).toMatchObject({ intent: 'task', strategy: 'all-hands' });
++    expect(plan.tasks).toHaveLength(AGENTS.length);
++  });
++
++  it('无任何信号 → expert 单人（花名册首位），绝不广播', () => {
++    const plan = heuristicPlan('登录页白屏', AGENTS);
++    expect(plan.strategy).toBe('expert');
++    expect(plan.tasks).toHaveLength(1);
++    expect(plan.tasks[0]!.agentId).toBe('pm');
++  });
++
++  it('单人群（1 个 agent）任何消息都走单人', () => {
++    const plan = heuristicPlan('帮我做个海报再写段文案', AGENTS.slice(3));
++    expect(plan.strategy).toBe('expert');
++    expect(plan.tasks.map((t) => t.agentId)).toEqual(['ops']);
++  });
++
++  it('空成员 → 空工单（调用方防尞回落）', () => {
++    const plan = heuristicPlan('hi', []);
++    expect(plan.tasks).toEqual([]);
++    expect(plan.strategy).toBe('expert');
++  });
++});
++
++// ── 单独计划构造 ────────────────────────────────────────────────────────────
++
++describe('mentionPlan / casualPlan / allHandsPlan', () => {
++  it('mentionPlan 单人 → expert、多人 → parallel，prompt 用清洗文本', () => {
++    const one = mentionPlan('@码农鸡 帮我看看', '帮我看看', AGENTS, ['dev']);
++    expect(one).toMatchObject({ intent: 'task', strategy: 'expert', source: 'mention' });
++    expect(one.tasks[0]!.prompt).toBe('帮我看看');
++
++    const two = mentionPlan('@策划喵 @设计鹅 一起看', '一起看', AGENTS, ['pm', 'design']);
++    expect(two.strategy).toBe('parallel');
++    expect(two.tasks.map((t) => t.agentId)).toEqual(['pm', 'design']);
++  });
++
++  it('mentionPlan 点名即派活：寒暄文本也按 task 定向应答', () => {
++    const plan = mentionPlan('@码农鸡 在吗', '在吗', AGENTS, ['dev']);
++    expect(plan.intent).toBe('task');
++    expect(plan.strategy).toBe('expert');
++    expect(plan.tasks[0]!.prompt).toBe('在吗');
++  });
++
++  it('mentionPlan 过滤非花名册 id', () => {
++    const plan = mentionPlan('@幽灵 你好', '你好', AGENTS, ['ghost']);
++    expect(plan.tasks).toEqual([]);
++  });
++
++  it('casualPlan → 首位接话', () => {
++    const plan = casualPlan('收到', AGENTS);
++    expect(plan).toMatchObject({ intent: 'casual', strategy: 'solo', source: 'casual' });
++    expect(plan.tasks.map((t) => t.agentId)).toEqual(['pm']);
++  });
++
++  it('allHandsPlan → 人人参与、各按职责视角', () => {
++    const plan = allHandsPlan('开始干活', AGENTS);
++    expect(plan.strategy).toBe('all-hands');
++    expect(plan.tasks).toHaveLength(4);
++    for (const t of plan.tasks) expect(t.prompt).toContain('职责视角');
++  });
++});
++
++// ── 派发卡 reason（可解释性）────────────────────────────────────────────────
++
++describe('describePlan — 路由解释文案', () => {
++  it('点名来源 → 说明跳过拆解', () => {
++    const plan = mentionPlan('@码农鸡 帮我看看', '帮我看看', AGENTS, ['dev']);
++    expect(describePlan(plan, nameOf)).toBe('用户点名 @码农鸡，定向派发（跳过意图拆解）');
++  });
++
++  it('启发式来源 → 意图 · 策略 · 参与者 · 策略矩阵路由', () => {
++    const plan = heuristicPlan('帮我修复登录页的前端 bug', AGENTS);
++    expect(describePlan(plan, nameOf)).toBe(
++      '意图：任务 · 策略：专家应答（码农鸡）· 策略矩阵路由',
++    );
++  });
++
++  it('LLM 来源 → 标注编排者拆解；多人折叠显示', () => {
++    const plan: ChatPlan = {
++      intent: 'task',
++      strategy: 'pipeline',
++      source: 'llm',
++      tasks: [
++        { agentId: 'pm', title: 'a', prompt: 'p1' },
++        { agentId: 'dev', title: 'b', prompt: 'p2' },
++        { agentId: 'design', title: 'c', prompt: 'p3' },
++      ],
++    };
++    const r = describePlan(plan, nameOf);
++    expect(r).toBe('意图：任务 · 策略：流水线拆解（策划喵、码农鸡 等 3 人）· 编排者拆解');
++  });
++});
+diff --git a/server/src/lib/__tests__/orchestrator-parse.test.ts b/server/src/lib/__tests__/orchestrator-parse.test.ts
+index 4ce6fe5..bdba764 100644
+--- a/server/src/lib/__tests__/orchestrator-parse.test.ts
++++ b/server/src/lib/__tests__/orchestrator-parse.test.ts
+@@ -9,6 +9,8 @@ import {
+   composeParsePrompt,
+   decomposeWithLlm,
+   parseOrchestratorJson,
++  parseOrchestratorPlan,
++  planWithLlm,
+   type OrchestratorAgent,
+ } from '../orchestrator-parse';
+ 
+@@ -130,3 +132,132 @@ describe('decomposeWithLlm', () => {
+     ).toBeNull();
+   });
+ });
++
++// ── {intent, strategy, tasks} 计划对象（2026-11-07 策略矩阵升级）─────────────
++
++describe('parseOrchestratorPlan — 计划对象解析', () => {
++  it('解析 {intent,strategy,tasks} 对象并保留元数据', () => {
++    const raw = JSON.stringify({
++      intent: 'question',
++      strategy: 'expert',
++      tasks: [{ agentId: 'writer', title: '应答', prompt: '解释这段代码' }],
++    });
++    const plan = parseOrchestratorPlan(raw, AGENTS)!;
++    expect(plan).toMatchObject({ intent: 'question', strategy: 'expert', source: 'llm' });
++    expect(plan.tasks).toHaveLength(1);
++  });
++
++  it('对象 span 优先于内嵌数组（否则 tasks 数组会截走、丢掉 intent/strategy）', () => {
++    const raw =
++      '好的，计划如下：\n```json\n' +
++      JSON.stringify({
++        intent: 'discussion',
++        strategy: 'roundtable',
++        tasks: [
++          { agentId: 'writer', prompt: '观点1' },
++          { agentId: 'reviewer', prompt: '观点2' },
++        ],
++      }) +
++      '\n```\n完成。';
++    const plan = parseOrchestratorPlan(raw, AGENTS)!;
++    expect(plan.intent).toBe('discussion');
++    expect(plan.strategy).toBe('roundtable');
++    expect(plan.tasks).toHaveLength(2);
++  });
++
++  it('旧数组格式 → 合成计划：单任务 expert / 多任务 parallel', () => {
++    const one = parseOrchestratorPlan('[{"agentId":"ops","prompt":"发布"}]', AGENTS)!;
++    expect(one).toMatchObject({ intent: 'task', strategy: 'expert', source: 'llm' });
++
++    const two = parseOrchestratorPlan(
++      '[{"agentId":"writer","prompt":"p1"},{"agentId":"reviewer","prompt":"p2"}]',
++      AGENTS,
++    )!;
++    expect(two).toMatchObject({ intent: 'task', strategy: 'parallel' });
++    expect(two.tasks).toHaveLength(2);
++  });
++
++  it('intent/strategy 不在枚举内 → 收敛到安全缺省（task / parallel|expert）', () => {
++    const raw = JSON.stringify({
++      intent: 'bogus',
++      strategy: 'zzz',
++      tasks: [{ agentId: 'writer', prompt: 'p' }],
++    });
++    expect(parseOrchestratorPlan(raw, AGENTS)).toMatchObject({
++      intent: 'task',
++      strategy: 'expert',
++    });
++
++    const raw2 = JSON.stringify({
++      intent: 'bogus',
++      strategy: 'zzz',
++      tasks: [
++        { agentId: 'writer', prompt: 'p1' },
++        { agentId: 'reviewer', prompt: 'p2' },
++      ],
++    });
++    expect(parseOrchestratorPlan(raw2, AGENTS)).toMatchObject({
++      intent: 'task',
++      strategy: 'parallel',
++    });
++  });
++
++  it('垃圾输入 / 空工单 → null', () => {
++    expect(parseOrchestratorPlan('', AGENTS)).toBeNull();
++    expect(parseOrchestratorPlan('随便说点什么', AGENTS)).toBeNull();
++    expect(parseOrchestratorPlan('{"intent":"task","strategy":"expert","tasks":[]}', AGENTS)).toBeNull();
++    expect(parseOrchestratorPlan('{"intent":"task","tasks":[{"agentId":"ghost","prompt":"p"}]}', AGENTS)).toBeNull();
++  });
++});
++
++describe('planWithLlm — 计划对象输出', () => {
++  function mockCall(chunks: ProviderChunk[]) {
++    return async function* (): AsyncGenerator<ProviderChunk> {
++      for (const c of chunks) yield c;
++    } as unknown as typeof import('../../transport/api-clients').callProvider;
++  }
++
++  it('流式输出计划对象 → 完整 ChatPlan（意图+策略+工单）', async () => {
++    const json = JSON.stringify({
++      intent: 'discussion',
++      strategy: 'roundtable',
++      tasks: [
++        { agentId: 'writer', title: '观点', prompt: '给观点' },
++        { agentId: 'reviewer', title: '补充', prompt: '补观点' },
++      ],
++    });
++    const plan = await planWithLlm({
++      userText: '帮我选 A 还是 B',
++      agents: AGENTS,
++      provider: 'anthropic',
++      apiKey: 'sk-test',
++      callImpl: mockCall([
++        { type: 'text-delta', text: '```json\n' },
++        { type: 'text-delta', text: json },
++        { type: 'text-delta', text: '\n```' },
++        { type: 'end' },
++      ]),
++    });
++    expect(plan).toMatchObject({
++      intent: 'discussion',
++      strategy: 'roundtable',
++      source: 'llm',
++    });
++    expect(plan!.tasks.map((t) => t.agentId)).toEqual(['writer', 'reviewer']);
++  });
++
++  it('无 apiKey / 输出不可解析 → null（调用方降级启发式）', async () => {
++    expect(
++      await planWithLlm({ userText: 'x', agents: AGENTS, provider: 'anthropic' }),
++    ).toBeNull();
++    expect(
++      await planWithLlm({
++        userText: 'x',
++        agents: AGENTS,
++        provider: 'anthropic',
++        apiKey: 'sk-test',
++        callImpl: mockCall([{ type: 'text-delta', text: '没想好' }, { type: 'end' }]),
++      }),
++    ).toBeNull();
++  });
++});
+diff --git a/server/src/lib/chat-strategy.ts b/server/src/lib/chat-strategy.ts
+new file mode 100644
+index 0000000..dc7f564
+--- /dev/null
++++ b/server/src/lib/chat-strategy.ts
+@@ -0,0 +1,367 @@
++/**
++ * chat-strategy.ts — 群聊意图识别 + 策略矩阵（2026-11-07，GrokBot 群聊范式对齐）。
++ *
++ * 背景（用户反馈 + 知乎《Grok Bot 两周实测》/ grokbot-usage-guide-zh 两份参考）：
++ * 群聊不该「一句话全员广播」——发个 hi 跑出一堆回复、任务消息人人来一遍。
++ * 多 Bot 协作的正确形态：先**意图识别**，再按**策略矩阵**选协作策略，复杂任务
++ * 按 **DAG 工单拆解**派给对口的执行者，最终只看到「对的人、对的回复」。
++ *
++ * 策略矩阵（意图 × 复杂度 → 协作策略）：
++ *
++ *   意图 \ 形态        单工种/单人            多工种/多人
++ *   ─────────────────────────────────────────────────────────
++ *   casual  寒暄/应答   solo 单人接话           —
++ *   question 问答/咨询  expert 专家应答（1 人）  并行拆分（多问各自对口）
++ *   discussion 讨论     roundtable 圆桌（2-3 人给观点）
++ *   task    任务        expert 专家执行（1 人）  pipeline 流水线（有先后依赖）
++ *                                              / parallel 并行分工（互相独立）
++ *   （任务但面向全体的号召：大家/各位/全员 → all-hands 全员参与）
++ *
++ * 分层：LLM 编排者（orchestrator-parse.planWithLlm，BYOK 可用时）优先出
++ * ChatPlan；不可用/失败 → 本模块 heuristicPlan 启发式兜底（纯函数、可单测）。
++ * **任何路径都不再「用户原文分发给全体成员」**——无信号时也只派最可能的 1 人。
++ *
++ * 纯函数、零 IO：分类 / 打分 / 拆单全部可离线单测（同 intent-router 纪律）。
++ */
++import type { ParsedTask } from './orchestrator-parse';
++
++// ─── 计划类型 ───────────────────────────────────────────────────────────────
++
++export type ChatIntent = 'casual' | 'question' | 'discussion' | 'task';
++export type ChatStrategy = 'solo' | 'expert' | 'pipeline' | 'parallel' | 'roundtable' | 'all-hands';
++
++/** 参与路由的成员投影（id + 展示名 + persona 摘要，专长打分用 soul）。 */
++export interface StrategyAgent {
++  id: string;
++  name: string;
++  soul?: string;
++}
++
++export interface ChatPlan {
++  intent: ChatIntent;
++  strategy: ChatStrategy;
++  /** 工单：执行者 + 每人自包含 prompt；顺序 = 串行执行/展示顺序。 */
++  tasks: ParsedTask[];
++  /** 计划来源：@点名（用户即调度者）/ 寒暄 / LLM 编排者拆解 / 策略矩阵启发式。 */
++  source: 'mention' | 'casual' | 'llm' | 'heuristic';
++}
++
++export const INTENT_LABELS: Record<ChatIntent, string> = {
++  casual: '寒暄',
++  question: '问答',
++  discussion: '讨论',
++  task: '任务',
++};
++
++export const STRATEGY_LABELS: Record<ChatStrategy, string> = {
++  solo: '单人应答',
++  expert: '专家应答',
++  pipeline: '流水线拆解',
++  parallel: '并行拆分',
++  roundtable: '圆桌讨论',
++  'all-hands': '全员参与',
++};
++
++// ─── 意图识别 ───────────────────────────────────────────────────────────────
++
++// 寒暄/应答（从 groups-chat.ts 迁入 —— 策略矩阵第一行）：整条消息就是一句
++// 问候/感谢/收尾，≤24 字、单行、无 @ 点名。
++const CASUAL_LINE_RE =
++  /^(?:hi+|hiya|hey+|hello+|yo|howdy|sup|hola|hello\s+there|good\s+(?:morning|afternoon|evening)|早上好|早安|早啊|早|中午好|下午好|晚上好|晚安|你好|您好|哈喽|嗨+|在吗|在么|在不在|thanks?|thank\s+(?:you|u)|thx+|tysm|ty|谢谢(?:你|您)?|多谢|感谢(?:你|您)?|辛苦了|麻烦了|ok(?:ay)?|好的?|好嘞|好滴|好哒|收到|明白|了解|没问题|嗯+|哦+|啊+|行|可以|拜拜|再见|88|回见|回头见)(?:[呀啦哦呢嘛呗哇吖!?！。.~～,，]*)$/i;
++
++/** 寒暄判定（纯函数）：整条消息是一句寒暄/应答 → true。 */
++export function isCasualChat(text: string): boolean {
++  const t = (text ?? '').trim();
++  if (!t || t.length > 24) return false;
++  if (/[\n@]/.test(t)) return false;
++  return CASUAL_LINE_RE.test(t);
++}
++
++// 讨论/征求意见信号（先于任务词判定：「帮我选 A 还是 B」是讨论不是派活）。
++const DISCUSS_RE =
++  /大家觉得|你们觉得|你怎么看|你们怎么看|大家怎么看|各位怎么看|帮我选|选哪个|哪个好|哪个更好|还是|讨论一下|商量|投票|发表(?:意见|看法)|给点(?:建议|意见|看法)|有什么(?:建议|意见|看法|推荐)|有何(?:建议|看法)|推荐一下|选择困难/;
++
++// 强任务动词（祈使/委托口吻 → 派活）。注意不含裸「请」——「请问」走问答。
++const STRONG_TASK_RE =
++  /帮我|给我|请你|请帮|帮忙|麻烦你?|写[一十-龥个篇份条段]|生成|做[一十-龥个]|制作|实现|开发|设计|分析|整理|总结|翻译|优化|修复|改[一十-龥下]|查一下|找一下|出一份|起草|拟[一十-龥个]|规划|安排|检查|测试|评审|审查|调研|搭[一十-龥个]|建[一十-龥个]|跑[一十-龥下]|编[一十-龥个]|干活|开工|动手/;
++
++// 问句信号。
++const QUESTION_RE =
++  /(什么|怎么|如何|为什么|为啥|为何|是不是|能不能|可不可以|有没有|请问|想问|多少|哪些|谁(?:来|能|会)|几(?:个|天|时|分钟)|讲讲|说说|解释)/;
++
++// 全体号召信号（「大家好，开始干活」是群呼，该全员参与而非抢答）。
++const COLLECTIVE_RE = /大家|各位|所有人|全员|大伙|你们(?:大家|所有人|几个)?|同学们|群里/;
++
++// 先后依赖信号（pipeline vs parallel 的分界）。
++const SEQUENCE_RE =
++  /先[^。！？!?]{0,20}(?:然后|接着|再|之后|最后)|然后|接着|之后|最后|基于(?:这个|这些|上述|它|其)|据此|在此基础上|完成(?:后|之后)/;
++
++export interface IntentClass {
++  intent: ChatIntent;
++  /** 命中的信号词（可解释性 / 测试断言用）。 */
++  signal: string;
++}
++
++/**
++ * 意图分类（启发式，优先级：寒暄 > 讨论 > 任务 > 问答 > 兜底任务）。
++ * 误判问答/任务的代价很低（都路由到对口专家），误判广播的代价很高，
++ * 所以默认保守：拿不准就当任务走「专家应答」单人路径。
++ */
++export function classifyChatIntent(text: string): IntentClass {
++  const t = (text ?? '').trim();
++  if (!t) return { intent: 'task', signal: 'empty' };
++  if (isCasualChat(t)) return { intent: 'casual', signal: 'casual-line' };
++  const discuss = DISCUSS_RE.exec(t);
++  if (discuss) return { intent: 'discussion', signal: discuss[0] };
++  const task = STRONG_TASK_RE.exec(t);
++  if (task) return { intent: 'task', signal: task[0] };
++  const q = QUESTION_RE.exec(t);
++  if (q && (/[?？]\s*$/.test(t) || t.length <= 60)) return { intent: 'question', signal: q[0] };
++  return { intent: 'task', signal: 'fallback' };
++}
++
++// ─── 专长匹配（agent fit 打分）──────────────────────────────────────────────
++
++/** 领域词库：消息命中某组 + 成员简介命中同组 → 强信号（对口）。 */
++const SPECIALTY_LEXICON: ReadonlyArray<{ kws: readonly string[] }> = [
++  { kws: ['产品', '需求', 'prd', '用户故事', '路线图', '立项', '原型', '场景'] },
++  { kws: ['设计', 'ui', 'ux', '视觉', '交互', '配色', '排版', 'logo', '图标', '界面', '样式', '海报'] },
++  { kws: ['前端', '页面', '组件', 'react', 'vue', 'css', 'h5', '小程序', 'web', '浏览器'] },
++  { kws: ['后端', '接口', 'api', '服务', '数据库', 'sql', '微服务', '架构', '部署', '服务器', '性能', '并发'] },
++  { kws: ['代码', '开发', '实现', '编程', '重构', 'bug', '修复', '调试', '脚本', '编译', '仓库', 'git'] },
++  { kws: ['测试', 'qa', '用例', '质量', '回归', '缺陷', '验收', '冒烟'] },
++  { kws: ['文案', '文章', '写作', '推文', '内容', '标题', '润色', '翻译', '英文', '英语', '本地化', '文档', '校对'] },
++  { kws: ['数据', '报表', '分析', '统计', '指标', '看板', 'bi', '可视化', '图表', '漏斗'] },
++  { kws: ['市场', '运营', '增长', '推广', '营销', '宣传', '获客', '活动', '品牌', 'seo', '投放'] },
++  { kws: ['视频', '剪辑', '分镜', '配音', '动画', '字幕'] },
++  { kws: ['法务', '合同', '合规', '协议', '知识产权', '条款'] },
++  { kws: ['财务', '预算', '成本', '报价', '核算', '发票'] },
++  { kws: ['调研', '研究', '文献', '综述', '竞品', '行业'] },
++];
++
++/** CJK 连续段切二元组（bag-of-bigrams 相似度，封顶防刷分）。 */
++function cjkBigrams(s: string): Set<string> {
++  const out = new Set<string>();
++  for (const run of s.match(/[一-龥]{2,}/g) ?? []) {
++    for (let i = 0; i + 1 < run.length && out.size < 48; i++) out.add(run.slice(i, i + 2));
++  }
++  return out;
++}
++
++/**
++ * 成员对一段文本的对口度（纯函数）：领域词组命中 +3/组（消息与简介同组），
++ * 名字出现在消息 +4，CJK 二元组重叠 +1/个（封顶 4）。0 = 无信号。
++ */
++export function scoreAgentFit(text: string, agent: StrategyAgent): number {
++  const g = (text ?? '').toLowerCase();
++  const bag = `${agent.name ?? ''} ${agent.soul ?? ''}`.toLowerCase();
++  if (!g.trim() || !bag.trim()) return 0;
++  let score = 0;
++  for (const { kws } of SPECIALTY_LEXICON) {
++    if (!kws.some((k) => g.includes(k))) continue;
++    if (kws.some((k) => bag.includes(k))) score += 3;
++  }
++  const name = (agent.name ?? '').trim();
++  if (name.length >= 2 && g.includes(name.toLowerCase())) score += 4;
++  let overlap = 0;
++  for (const gram of cjkBigrams(g)) {
++    if (bag.includes(gram)) overlap++;
++  }
++  score += Math.min(4, overlap);
++  return score;
++}
++
++/** 按对口度取前 n 人（稳定排序：同分按花名册顺序；全体 0 分 → 花名册顺序）。 */
++export function topAgents(text: string, agents: StrategyAgent[], n: number): StrategyAgent[] {
++  const scored = agents.map((a, i) => ({ a, s: scoreAgentFit(text, a), i }));
++  scored.sort((x, y) => y.s - x.s || x.i - y.i);
++  return scored.slice(0, Math.max(1, n)).map((x) => x.a);
++}
++
++// ─── 子任务切分 ─────────────────────────────────────────────────────────────
++
++/**
++ * 把消息切成子句（工单粒度）：先按句读切；整条只有一句且较长时退化到逗号切
++ * （「先帮我整理需求文档，然后实现登录接口」→ 2 段）。「、」顿号不切（同一
++ * 诉求里的并列宾语不拆）。
++ */
++export function splitTaskClauses(text: string): string[] {
++  const t = (text ?? '').trim();
++  if (!t) return [];
++  let parts = t
++    .split(/[。！？!?\n；;]+/)
++    .map((s) => s.trim())
++    .filter(Boolean);
++  if (parts.length <= 1 && /[，,]/.test(t) && t.length > 16) {
++    parts = t
++      .split(/[，,]+/)
++      .map((s) => s.trim())
++      .filter((s) => s.length >= 2);
++  }
++  return parts.length > 0 ? parts : [t];
++}
++
++// ─── 计划构造 ───────────────────────────────────────────────────────────────
++
++function makeTask(
++  agent: StrategyAgent,
++  title: string,
++  prompt: string,
++  dependsOn?: string[],
++): ParsedTask {
++  return {
++    agentId: agent.id,
++    title: title.slice(0, 40),
++    prompt,
++    ...(dependsOn && dependsOn.length > 0 ? { depends_on: dependsOn } : {}),
++  };
++}
++
++/** 寒暄计划：成员首位单人接话（像普通群聊，一人回一句）。 */
++export function casualPlan(text: string, agents: StrategyAgent[]): ChatPlan {
++  const host = agents[0];
++  return {
++    intent: 'casual',
++    strategy: 'solo',
++    source: 'casual',
++    tasks: host ? [makeTask(host, '寒暄应答', text)] : [],
++  };
++}
++
++/**
++ * @ 点名计划：用户即调度者（GrokBot「单点 @ 串行交接」语义）——只派被点名
++ * 者，prompt 用剔掉 @token 的清洗文本，跳过一切拆解。
++ */
++export function mentionPlan(
++  userText: string,
++  cleanText: string,
++  agents: StrategyAgent[],
++  mentionedIds: string[],
++): ChatPlan {
++  const text = (cleanText || userText).trim() || userText;
++  const cls = classifyChatIntent(text);
++  const valid = new Set(agents.map((a) => a.id));
++  const ids = [...new Set(mentionedIds)].filter((id) => valid.has(id));
++  const byId = new Map(agents.map((a) => [a.id, a]));
++  return {
++    // 点名即派活：即便文本是「在吗」也是定向应答，不按寒暄收缩。
++    intent: cls.intent === 'casual' ? 'task' : cls.intent,
++    strategy: ids.length > 1 ? 'parallel' : 'expert',
++    source: 'mention',
++    tasks: ids.map((id) => makeTask(byId.get(id) ?? { id, name: id }, '定向派活', text)),
++  };
++}
++
++/** 全员参与计划（群呼号召 / @ 未命中回落）：人人参与，各按职责视角回应。 */
++export function allHandsPlan(text: string, agents: StrategyAgent[]): ChatPlan {
++  return {
++    intent: 'task',
++    strategy: 'all-hands',
++    source: 'heuristic',
++    tasks: agents.map((a) =>
++      makeTask(a, '参与', `${text}\n\n请以「${a.name}」的职责视角回应，保持简短。`),
++    ),
++  };
++}
++
++/**
++ * 启发式策略矩阵计划（LLM 不可用时的兜底主力）：
++ *   寒暄 → solo；讨论 → roundtable（2-3 人观点）；任务/问答 →
++ *   群呼 all-hands / 多子句多对口 → pipeline（有先后词）或 parallel /
++ *   其余 → expert 单人（无信号也不广播）。
++ */
++export function heuristicPlan(text: string, agents: StrategyAgent[]): ChatPlan {
++  const t = (text ?? '').trim();
++  if (agents.length === 0) {
++    return { intent: 'task', strategy: 'expert', source: 'heuristic', tasks: [] };
++  }
++  if (isCasualChat(t)) return casualPlan(t, agents);
++
++  const cls = classifyChatIntent(t);
++  const intent: ChatIntent = cls.intent === 'casual' ? 'task' : cls.intent;
++
++  if (agents.length === 1) {
++    return {
++      intent,
++      strategy: 'expert',
++      source: 'heuristic',
++      tasks: [makeTask(agents[0], intent === 'question' ? '应答' : '执行', t)],
++    };
++  }
++
++  if (intent === 'discussion') {
++    const picks = topAgents(t, agents, Math.min(3, agents.length));
++    return {
++      intent,
++      strategy: 'roundtable',
++      source: 'heuristic',
++      tasks: picks.map((a) =>
++        makeTask(
++          a,
++          '发表观点',
++          `${t}\n\n请以「${a.name}」的角色给出简短观点（不超过 3 点），不要重复他人说过的角度。`,
++        ),
++      ),
++    };
++  }
++
++  // 任务 / 问答
++  if (COLLECTIVE_RE.test(t)) return allHandsPlan(t, agents);
++
++  const clauses = splitTaskClauses(t);
++  const picks = clauses.map((c) => topAgents(c, agents, 1)[0]);
++  const distinct = [...new Set(picks.map((a) => a.id))];
++  if (distinct.length >= 2) {
++    // 多工种拆解：同一执行者的子句合并为一张工单；有先后词 → 流水线链式依赖。
++    const seq = SEQUENCE_RE.test(t);
++    const byAgent = new Map<string, string[]>();
++    picks.forEach((a, i) => {
++      byAgent.set(a.id, [...(byAgent.get(a.id) ?? []), clauses[i]]);
++    });
++    const tasks: ParsedTask[] = [];
++    let prevId: string | null = null;
++    for (const [id, cs] of byAgent) {
++      const agent = agents.find((x) => x.id === id) ?? { id, name: id };
++      tasks.push(
++        makeTask(
++          agent,
++          cs[0].slice(0, 20),
++          `${cs.join('。')}\n\n（这是整体需求拆分给你的部分。整体需求：${t}）`,
++          seq && prevId ? [prevId] : undefined,
++        ),
++      );
++      prevId = id;
++    }
++    return {
++      intent,
++      strategy: seq ? 'pipeline' : 'parallel',
++      source: 'heuristic',
++      tasks,
++    };
++  }
++
++  const best = picks[0];
++  return {
++    intent,
++    strategy: 'expert',
++    source: 'heuristic',
++    tasks: [makeTask(best, intent === 'question' ? '应答' : '执行', t)],
++  };
++}
++
++// ─── 计划可解释性（派发卡 reason）───────────────────────────────────────────
++
++/** 派发卡 reason：意图 · 策略 · 参与者 · 计划来源（用户可见的路由解释）。 */
++export function describePlan(plan: ChatPlan, nameOf: (id: string) => string): string {
++  const names = [...new Set(plan.tasks.map((t) => t.agentId))].map(nameOf);
++  if (plan.source === 'mention') {
++    return `用户点名 @${names.join('、')}，定向派发（跳过意图拆解）`;
++  }
++  const who =
++    names.length > 1
++      ? `${names.slice(0, 2).join('、')}${names.length > 2 ? ` 等 ${names.length} 人` : ''}`
++      : (names[0] ?? '');
++  const sourceNote =
++    plan.source === 'llm' ? '· 编排者拆解' : plan.source === 'heuristic' ? '· 策略矩阵路由' : '';
++  return `意图：${INTENT_LABELS[plan.intent]} · 策略：${STRATEGY_LABELS[plan.strategy]}（${who}）${sourceNote}`;
++}
+diff --git a/server/src/lib/orchestrator-parse.ts b/server/src/lib/orchestrator-parse.ts
+index 64e7cbb..e97dcd5 100644
+--- a/server/src/lib/orchestrator-parse.ts
++++ b/server/src/lib/orchestrator-parse.ts
+@@ -5,19 +5,20 @@
+  * 每回合先跑 INTENT_PARSE——把用户的原始消息拆解成 per-agent 子任务清单
+  * （流式 plan + JSON 任务列表），DISPATCH 阶段才按 DAG 分层派发。
+  *
+- * ShadowFlow 落地（groups-chat.ts runFanout 团队分支）：
++ * ShadowFlow 落地（groups-chat.ts runFanout 意图路由）：
+  *   1. `composeParsePrompt` — 组装给编排者的指令（成员名单 + 角色 soul +
+- *      用户消息），要求输出严格 JSON；
+- *   2. `decomposeWithLlm` — 走 BYOK provider（callProvider，与
+- *      /api/llm/messages 同一后端），收集 text-delta 拼全文；
+- *   3. `parseOrchestratorJson` — 纯函数：剥 ``` 围栏、抽 JSON（容忍前后
+- *      杂文）、校验 agentId 归属团队成员、产出 ParsedTask[]；
++ *      用户消息 + 策略矩阵），要求输出 {intent, strategy, tasks} JSON；
++ *   2. `planWithLlm` — 走 BYOK provider（callProvider，与 /api/llm/messages
++ *      同一后端），收集 text-delta 拼全文，产出 ChatPlan（意图+策略+工单）；
++ *   3. `parseOrchestratorPlan` — 纯函数：剥 ``` 围栏、抽 JSON（容忍前后
++ *      杂文与旧数组格式）、校验 agentId 归属团队成员、收敛 intent/strategy；
+  *   4. 任何失败（无 key / 网络错 / JSON 不合法 / 空清单）→ 返回 null，
+- *      调用方降级为现状（用户原文直接分发给所有 agent），零回归。
++ *      调用方降级为启发式策略矩阵（chat-strategy.heuristicPlan），零回归。
+  *
+  * 纯函数（compose/parse）与 IO（decompose）分离，便于单测。
+  */
+ import { callProvider } from '../transport/api-clients';
++import type { ChatIntent, ChatPlan, ChatStrategy } from './chat-strategy';
+ 
+ export interface OrchestratorAgent {
+   id: string;
+@@ -51,7 +52,7 @@ export function composeParsePrompt(userText: string, agents: OrchestratorAgent[]
+     })
+     .join('\n');
+   return [
+-    '你是这个多 Agent 团队的编排者。把用户的请求拆解成团队成员的子任务。',
++    '你是这个多 Agent 团队的编排者。先识别用户消息的意图，再按策略矩阵把请求拆解成团队成员的子任务。',
+     '',
+     '## 团队成员',
+     roster,
+@@ -59,32 +60,47 @@ export function composeParsePrompt(userText: string, agents: OrchestratorAgent[]
+     '## 用户请求',
+     userText,
+     '',
++    '## 策略矩阵（意图 → 协作策略）',
++    '- 寒暄/应答 → intent=casual, strategy=solo（只派 1 人轻松回复）',
++    '- 问答/咨询 → intent=question, strategy=expert（只派最对口的 1 人）',
++    '- 讨论/征求意见 → intent=discussion, strategy=roundtable（2-3 人给观点）',
++    '- 任务单工种 → intent=task, strategy=expert（1 人）',
++    '- 任务多工种且有先后依赖 → intent=task, strategy=pipeline（按 depends_on 串行交接）',
++    '- 任务多工种互相独立 → intent=task, strategy=parallel（并行分工）',
++    '- 面向全体的号召（大家/各位/全员一起…）→ intent=task, strategy=all-hands（全员参与）',
++    '',
+     '## 输出要求',
+-    '只输出一个 JSON 数组（可包在 ```json 围栏里），不要其他文字。每项：',
+-    '{ "agentId": "<成员 id，必须来自上面名单>", "title": "≤20字任务标题", "prompt": "发给该 agent 的完整指令，包含它需要的全部上下文", "depends_on": ["<依赖的成员 id>"] }',
++    '只输出一个 JSON 对象（可包在 ```json 围栏里），不要其他文字：',
++    '{',
++    '  "intent": "casual | question | discussion | task",',
++    '  "strategy": "solo | expert | pipeline | parallel | roundtable | all-hands",',
++    '  "tasks": [ { "agentId": "<成员 id，必须来自上面名单>", "title": "≤20字任务标题", "prompt": "发给该 agent 的完整指令，包含它需要的全部上下文", "depends_on": ["<依赖的成员 id>"] } ]',
++    '}',
+     '规则：每个成员至多一个任务；与请求无关的成员不要分配；prompt 用中文、自包含（不要写"见上文"）。',
+   ].join('\n');
+ }
+ 
+ /**
+- * Extract + validate the orchestrator's JSON task list. Tolerates:
++ * Extract the orchestrator's JSON payload. Tolerates:
+  *   • ```json fences
+  *   • prose before/after the JSON body
+- *   • unknown agents (dropped), duplicate agents (first wins)
+- *   • missing title (falls back to prompt head), missing depends_on
+- * Returns null when nothing usable remains.
++ *   • BOTH shapes: the plan object {"intent","strategy","tasks":[...]}（现行）
++ *     and the legacy bare array [...]（2026-11-07 之前的旧 prompt 输出）
++ * Returns the tasks list (unvalidated) plus optional plan metadata.
+  */
+-export function parseOrchestratorJson(
+-  raw: string,
+-  agents: OrchestratorAgent[],
+-): ParsedTask[] | null {
++function extractPlanJson(raw: string): { tasks: unknown[]; intent?: unknown; strategy?: unknown } | null {
+   const text = raw.trim();
+   if (!text) return null;
+ 
+   const candidates: string[] = [];
+-  // Fenced block first (```json ... ```), then the outermost [...] span.
++  // Fenced block first (```json ... ```), then the outermost {...} span (object
++  // shape BEFORE array span — 否则 tasks 数组会被当成 legacy 数组截走、丢掉
++  // intent/strategy 元数据), then the outermost [...] span, then the raw text.
+   const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
+   if (fence?.[1]) candidates.push(fence[1].trim());
++  const oStart = text.indexOf('{');
++  const oEnd = text.lastIndexOf('}');
++  if (oStart !== -1 && oEnd > oStart) candidates.push(text.slice(oStart, oEnd + 1));
+   const start = text.indexOf('[');
+   const end = text.lastIndexOf(']');
+   if (start !== -1 && end > start) candidates.push(text.slice(start, end + 1));
+@@ -97,34 +113,95 @@ export function parseOrchestratorJson(
+     } catch {
+       continue;
+     }
+-    if (!Array.isArray(parsed)) continue;
+-    const validIds = new Set(agents.map((a) => a.id));
+-    const seen = new Set<string>();
+-    const tasks: ParsedTask[] = [];
+-    for (const item of parsed) {
+-      if (!item || typeof item !== 'object') continue;
+-      const t = item as Record<string, unknown>;
+-      const agentId = typeof t.agentId === 'string' ? t.agentId : '';
+-      const prompt = typeof t.prompt === 'string' ? t.prompt.trim() : '';
+-      if (!agentId || !validIds.has(agentId) || !prompt || seen.has(agentId)) continue;
+-      const rawTitle = typeof t.title === 'string' ? t.title.trim() : '';
+-      const title = (rawTitle || prompt.slice(0, 20)).slice(0, 40);
+-      const dependsOn = Array.isArray(t.depends_on)
+-        ? t.depends_on.filter((d): d is string => typeof d === 'string' && validIds.has(d))
+-        : undefined;
+-      seen.add(agentId);
+-      tasks.push({
+-        agentId,
+-        title,
+-        prompt,
+-        ...(dependsOn && dependsOn.length > 0 ? { depends_on: dependsOn } : {}),
+-      });
++    if (Array.isArray(parsed)) return { tasks: parsed };
++    if (parsed && typeof parsed === 'object') {
++      const obj = parsed as Record<string, unknown>;
++      if (Array.isArray(obj.tasks)) {
++        return { tasks: obj.tasks, intent: obj.intent, strategy: obj.strategy };
++      }
+     }
+-    if (tasks.length > 0) return tasks;
+   }
+   return null;
+ }
+ 
++/**
++ * Validate + normalize the task list. Tolerates:
++ *   • unknown agents (dropped), duplicate agents (first wins)
++ *   • missing title (falls back to prompt head), missing depends_on
++ * Returns null when nothing usable remains.
++ */
++function validateTasks(list: unknown[], agents: OrchestratorAgent[]): ParsedTask[] | null {
++  const validIds = new Set(agents.map((a) => a.id));
++  const seen = new Set<string>();
++  const tasks: ParsedTask[] = [];
++  for (const item of list) {
++    if (!item || typeof item !== 'object') continue;
++    const t = item as Record<string, unknown>;
++    const agentId = typeof t.agentId === 'string' ? t.agentId : '';
++    const prompt = typeof t.prompt === 'string' ? t.prompt.trim() : '';
++    if (!agentId || !validIds.has(agentId) || !prompt || seen.has(agentId)) continue;
++    const rawTitle = typeof t.title === 'string' ? t.title.trim() : '';
++    const title = (rawTitle || prompt.slice(0, 20)).slice(0, 40);
++    const dependsOn = Array.isArray(t.depends_on)
++      ? t.depends_on.filter((d): d is string => typeof d === 'string' && validIds.has(d))
++      : undefined;
++    seen.add(agentId);
++    tasks.push({
++      agentId,
++      title,
++      prompt,
++      ...(dependsOn && dependsOn.length > 0 ? { depends_on: dependsOn } : {}),
++    });
++  }
++  return tasks.length > 0 ? tasks : null;
++}
++
++const PLAN_INTENTS: readonly ChatIntent[] = ['casual', 'question', 'discussion', 'task'];
++const PLAN_STRATEGIES: readonly ChatStrategy[] = [
++  'solo',
++  'expert',
++  'pipeline',
++  'parallel',
++  'roundtable',
++  'all-hands',
++];
++
++/**
++ * Extract + validate the full orchestrator plan（意图 + 策略 + 工单）。
++ * 旧数组输出 → 合成计划（intent=task，多任务默认 parallel）；LLM 给的
++ * intent/strategy 不在枚举内 → 收敛到安全缺省。Returns null when nothing
++ * usable remains.
++ */
++export function parseOrchestratorPlan(
++  raw: string,
++  agents: OrchestratorAgent[],
++): ChatPlan | null {
++  const payload = extractPlanJson(raw);
++  if (!payload) return null;
++  const tasks = validateTasks(payload.tasks, agents);
++  if (!tasks) return null;
++  const intent: ChatIntent = PLAN_INTENTS.includes(payload.intent as ChatIntent)
++    ? (payload.intent as ChatIntent)
++    : 'task';
++  const strategy: ChatStrategy = PLAN_STRATEGIES.includes(payload.strategy as ChatStrategy)
++    ? (payload.strategy as ChatStrategy)
++    : tasks.length > 1
++      ? 'parallel'
++      : 'expert';
++  return { intent, strategy, tasks, source: 'llm' };
++}
++
++/**
++ * Extract + validate the orchestrator's JSON task list（legacy 契约：只回工单）。
++ * Kept for existing callers/tests — delegates to parseOrchestratorPlan.
++ */
++export function parseOrchestratorJson(
++  raw: string,
++  agents: OrchestratorAgent[],
++): ParsedTask[] | null {
++  return parseOrchestratorPlan(raw, agents)?.tasks ?? null;
++}
++
+ export interface DecomposeOptions {
+   userText: string;
+   agents: OrchestratorAgent[];
+@@ -139,17 +216,19 @@ export interface DecomposeOptions {
+ }
+ 
+ /**
+- * INTENT_PARSE：ask the BYOK LLM to decompose the user message into per-agent
+- * tasks. Returns null on ANY failure (no key / provider error / unparseable
+- * JSON / empty task list) — the caller then dispatches the raw user text to
+- * every agent exactly like today (graceful degradation, never fabricated).
++ * INTENT_PARSE：ask the BYOK LLM to classify intent + pick a strategy from the
++ * strategy matrix + decompose the user message into per-agent work orders
++ * (one ChatPlan). Returns null on ANY failure (no key / provider error /
++ * unparseable JSON / empty task list) — the caller then falls back to the
++ * heuristic strategy matrix (chat-strategy.heuristicPlan), never fabricates.
+  */
+-export async function decomposeWithLlm(opts: DecomposeOptions): Promise<ParsedTask[] | null> {
++export async function planWithLlm(opts: DecomposeOptions): Promise<ChatPlan | null> {
+   const call = opts.callImpl ?? callProvider;
+   if (!opts.apiKey) return null;
+   const system = [
+-    '你是多 Agent 团队的编排者（orchestrator）。你的唯一职责：把用户请求拆解为成员子任务。',
+-    '输出必须是严格的 JSON 数组，无任何多余文字。',
++    '你是多 Agent 团队的编排者（orchestrator）。你的唯一职责：识别用户消息意图，',
++    '按策略矩阵选择协作策略，并把请求拆解为成员子任务。',
++    '输出必须是严格的 JSON 对象（intent/strategy/tasks），无任何多余文字。',
+   ].join('\n');
+ 
+   let text = '';
+@@ -173,5 +252,14 @@ export async function decomposeWithLlm(opts: DecomposeOptions): Promise<ParsedTa
+   } catch {
+     return null;
+   }
+-  return parseOrchestratorJson(text, opts.agents);
++  return parseOrchestratorPlan(text, opts.agents);
++}
++
++/**
++ * Legacy entry（2026-11-07 前的契约）：只回工单清单。委托 planWithLlm ——
++ * 旧数组输出仍可解析（parseOrchestratorPlan 兼容）。新调用方直接用 planWithLlm。
++ */
++export async function decomposeWithLlm(opts: DecomposeOptions): Promise<ParsedTask[] | null> {
++  const plan = await planWithLlm(opts);
++  return plan ? plan.tasks : null;
+ }
+diff --git a/server/src/routes/__tests__/groups-chat-routing.test.ts b/server/src/routes/__tests__/groups-chat-routing.test.ts
+new file mode 100644
+index 0000000..37e32b8
+--- /dev/null
++++ b/server/src/routes/__tests__/groups-chat-routing.test.ts
+@@ -0,0 +1,268 @@
++/**
++ * groups-chat-routing.test.ts — 意图识别 + 策略矩阵路由行为测试（2026-11-07，GrokBot 范式）。
++ *
++ * 沿用 groups-chat-mention 的 mock 脚手架（内存 backend/dispatcher/gw），验证
++ * 「对的人、对的回复」——任何路径都不再原文全员广播：
++ *   - 专长路由：任务/问答只派最对口的 1 人（DAG 子图收缩到该节点）；
++ *   - 多子句有先后词 → pipeline 链式 depends_on、每人 prompt 自包含；
++ *   - 多子句无先后词 → parallel 分工；
++ *   - 讨论 → roundtable 2-3 人给观点（不是全员）；全员号召 → all-hands 才全跑；
++ *   - 无信号 → 单人不广播；寒暄 → 首位单人接话；
++ *   - LLM 编排者计划优先、失败降级启发式；intent 帧 reason 可解释（策略矩阵文案）。
++ *
++ * Run:
++ *   npx vitest run --config vitest.server.config.ts server/src/routes/__tests__/groups-chat-routing.test.ts
++ */
++import { describe, it, expect, vi, beforeEach } from 'vitest';
++
++// ── mock 重依赖（模块级，import 路由前生效）────────────────────────────────
++
++// team 真源：四工种线性团队 pm→dev→design→ops（专长互不重叠）。
++const teamShape = {
++  members: ['pm', 'dev', 'design', 'ops'],
++  edges: [
++    { from: 'pm', to: 'dev', kind: 'sequential' },
++    { from: 'dev', to: 'design', kind: 'sequential' },
++    { from: 'design', to: 'ops', kind: 'sequential' },
++  ],
++  policy_matrix: {},
++  name: '四工种小队',
++};
++vi.mock('../../lib/team-source', () => ({
++  loadTeamForRun: vi.fn(() => ({ team: teamShape, errors: [] })),
++}));
++
++// agent 读取：id→记录（soul = 专长词，供 scoreAgentFit 打分 + dispatcher 反查）。
++const agentRecords: Record<string, { agent_id: string; name: string; soul: string }> = {
++  pm: { agent_id: 'pm', name: '策划喵', soul: '产品 需求 用户故事 路线图' },
++  dev: { agent_id: 'dev', name: '码农鸡', soul: '开发 代码 后端 接口 数据库 sql 性能 bug 修复' },
++  design: { agent_id: 'design', name: '设计鹅', soul: '设计 ui 界面 海报 配色' },
++  ops: { agent_id: 'ops', name: '运营鹅', soul: '运营 发布 推广 增长' },
++};
++
++// groups-backend：群记录 + 消息落库内存化。
++const groupRecord = {
++  group_id: 'g1',
++  agent_ids: ['pm', 'dev', 'design', 'ops'],
++  messages: [] as Array<{ content: string; sender_kind: string; sender_name: string }>,
++  kind: 'group',
++  /** 默认绑团队 → DAG 路径；串行用例改 members=[] 模拟 team 读不到。 */
++  team_id: 't-default' as string | null,
++};
++const postedMessages: Array<{ content: string; sender_name: string; sender_kind: string; agent_id?: string }> = [];
++vi.mock('../../storage/groups-backend', () => ({
++  getGroupsBackend: () => ({
++    getGroup: vi.fn(async (id: string) => ({ ...groupRecord, group_id: id })),
++    appendMessage: vi.fn(async (_id: string, body: { content: string; sender_name: string; sender_kind: string; agent_id?: string }) => {
++      postedMessages.push(body);
++      groupRecord.messages.push(body as never);
++      return { ...body, message_id: `m-${postedMessages.length}` };
++    }),
++  }),
++}));
++
++// HTTP 打 Python 的路径（agent 读取走全局 fetch → stub 掉）。
++vi.stubGlobal('fetch', vi.fn(async (url: string) => {
++  const m = /\/api\/agents\/([^/]+)$/.exec(String(url));
++  if (m) {
++    const a = agentRecords[decodeURIComponent(m[1])];
++    if (a) {
++      return new Response(JSON.stringify({ data: a }), {
++        status: 200,
++        headers: { 'Content-Type': 'application/json' },
++      });
++    }
++  }
++  return new Response('{}', { status: 404 });
++}));
++vi.mock('../../python-backend', () => ({ PYTHON_BACKEND_URL: 'http://127.0.0.1:1' }));
++
++// dispatcher：resolveCallable 返回可观测 fake。
++const turnPrompts: Array<{ agentId: string; prompt: string }> = [];
++vi.mock('../../transport/dispatcher', () => ({
++  resolveCallable: (_executor: string) => ({
++    turn: async function* (args: { system: string; prompt: string }) {
++      // 专长 soul 反查 agentId（测试观测用）。
++      const agentId = Object.entries(agentRecords).find(
++        ([, a]) => a.soul === args.system,
++      )?.[0] ?? 'unknown';
++      turnPrompts.push({ agentId, prompt: args.prompt });
++      yield { type: 'text-delta', value: `${agentId} 收到` };
++    },
++  }),
++}));
++
++// gateway run：内存 gw + 帧捕获（intent/plan_card 断言用）。
++const gwMessages: Array<Record<string, unknown>> = [];
++vi.mock('../../lib/gateway-run', () => ({
++  startGatewayRun: vi.fn(() => {
++    let n = 0;
++    return {
++      turnId: 'turn-1',
++      nextId: () => `gw-${++n}`,
++      emitMessage: vi.fn((m: Record<string, unknown>) => {
++        gwMessages.push(m);
++      }),
++      emitPatch: vi.fn(),
++      finish: vi.fn(),
++    };
++  }),
++}));
++
++// worktree：非 git 环境短路。
++vi.mock('../../lib/worktree-manager', () => ({
++  isGitWorkable: vi.fn(async () => false),
++  prepareWorktree: vi.fn(async () => null),
++  integrateAll: vi.fn(async () => []),
++  commitWorktree: vi.fn(async () => null),
++}));
++
++// LLM 编排者：整模块 mock（计划对象可控；启发式用例走 cli:claude 不触达）。
++vi.mock('../../lib/orchestrator-parse', () => ({
++  planWithLlm: vi.fn(async () => null),
++}));
++
++import { runFanoutAsync } from '../groups-chat';
++import { planWithLlm } from '../../lib/orchestrator-parse';
++
++function intentFrames(): Array<Record<string, unknown>> {
++  return gwMessages.filter((m) => m.kind === 'intent');
++}
++function ranAgents(): string[] {
++  return turnPrompts.map((t) => t.agentId);
++}
++/** 稳定排序后的执行名单（DAG 并行批次内顺序不保证时用）。 */
++function ranSorted(): string[] {
++  return ranAgents().slice().sort();
++}
++
++beforeEach(() => {
++  postedMessages.length = 0;
++  groupRecord.messages = [];
++  turnPrompts.length = 0;
++  gwMessages.length = 0;
++  (teamShape as { members: string[] }).members = ['pm', 'dev', 'design', 'ops'];
++  groupRecord.team_id = 't-default';
++  vi.mocked(planWithLlm).mockReset().mockImplementation(async () => null);
++});
++
++// ── DAG 路径：专长路由 + 策略矩阵 ──────────────────────────────────────────
++
++describe('runFanout — 策略矩阵路由（DAG 路径）', () => {
++  it('任务 → 专家应答：只跑最对口的 dev（子图收缩，不全员广播）', async () => {
++    await runFanoutAsync('g1', 'cli:claude', undefined, {}, '帮我修复登录页的前端 bug');
++    expect(ranAgents()).toEqual(['dev']);
++    // 派发卡 reason 可解释：意图 · 策略 · 参与者 · 路由来源。
++    const reason = String(intentFrames()[0]?.reason ?? '');
++    expect(reason).toContain('策略：专家应答');
++    expect(reason).toContain('码农鸡');
++    expect(reason).toContain('策略矩阵路由');
++  });
++
++  it('问答 → 专家应答：SQL 问题只派 dev，意图标「问答」', async () => {
++    await runFanoutAsync('g1', 'cli:claude', undefined, {}, 'SQL 查询慢是什么原因？');
++    expect(ranAgents()).toEqual(['dev']);
++    expect(String(intentFrames()[0]?.reason ?? '')).toContain('意图：问答');
++  });
++
++  it('多子句有先后词 → pipeline：pm→dev 链式执行、prompt 自包含', async () => {
++    await runFanoutAsync('g1', 'cli:claude', undefined, {}, '先帮我整理需求文档，然后实现登录接口');
++    expect(ranAgents()).toEqual(['pm', 'dev']);
++    expect(turnPrompts[0]!.prompt).toContain('整理需求文档');
++    expect(turnPrompts[0]!.prompt).toContain('整体需求');
++    expect(turnPrompts[1]!.prompt).toContain('实现登录接口');
++    expect(turnPrompts[1]!.prompt).toContain('整体需求');
++    // plan_card 标题带策略标识（前端简洁呈现：一行看懂编排策略）。
++    const planCard = gwMessages.find((m) => m.kind === 'plan_card');
++    expect(String(planCard?.title ?? '')).toContain('流水线拆解');
++  });
++
++  it('全员号召 → all-hands：全员参与（此时才整图执行）', async () => {
++    await runFanoutAsync('g1', 'cli:claude', undefined, {}, '大家好，开始干活');
++    expect(ranSorted()).toEqual(['design', 'dev', 'ops', 'pm']);
++    expect(String(intentFrames()[0]?.reason ?? '')).toContain('全员参与');
++  });
++
++  it('寒暄「hi」→ 首位单人接话，不进 DAG 不广播', async () => {
++    await runFanoutAsync('g1', 'cli:claude', undefined, {}, 'hi');
++    expect(ranAgents()).toEqual(['pm']);
++  });
++});
++
++// ── 串行降级路径（无 team）：策略矩阵同样生效 ───────────────────────────────
++
++describe('runFanout — 策略矩阵路由（串行降级路径）', () => {
++  beforeEach(() => {
++    // team 读不到（members 空）→ 串行 fan-out。
++    (teamShape as { members: string[] }).members = [];
++  });
++
++  it('多子句无先后词 → parallel：pm/design 分工，prompt 各含自己的子句', async () => {
++    await runFanoutAsync('g1', 'cli:claude', undefined, {}, '帮我整理一下需求文档，帮我设计一张活动海报');
++    expect(ranAgents()).toEqual(['pm', 'design']);
++    expect(turnPrompts[0]!.prompt).toContain('整理一下需求文档');
++    expect(turnPrompts[0]!.prompt).toContain('整体需求');
++    expect(turnPrompts[1]!.prompt).toContain('设计一张活动海报');
++    const reason = String(intentFrames()[0]?.reason ?? '');
++    expect(reason).toContain('策略：并行拆分');
++    expect(reason).toContain('工单：');
++  });
++
++  it('讨论 → roundtable：2-3 人给观点（第 4 人不参与，不是全员）', async () => {
++    await runFanoutAsync('g1', 'cli:claude', undefined, {}, '帮我选 A 还是 B');
++    expect(ranAgents()).toEqual(['pm', 'dev', 'design']);
++    expect(ranAgents()).not.toContain('ops');
++    expect(turnPrompts[0]!.prompt).toContain('观点');
++    expect(String(intentFrames()[0]?.reason ?? '')).toContain('圆桌讨论');
++  });
++
++  it('无信号 → 单人不广播（花名册首位兜底）', async () => {
++    await runFanoutAsync('g1', 'cli:claude', undefined, {}, '登录页白屏');
++    expect(ranAgents()).toEqual(['pm']);
++    expect(turnPrompts[0]!.prompt).toBe('登录页白屏');
++  });
++
++  it('寒暄串行同样收缩：「谢谢」只回一条', async () => {
++    await runFanoutAsync('g1', 'cli:claude', undefined, {}, '谢谢');
++    expect(ranAgents()).toEqual(['pm']);
++  });
++});
++
++// ── LLM 编排者计划：优先采纳、失败降级启发式 ───────────────────────────────
++
++describe('runFanout — LLM 编排者计划', () => {
++  const LLM_HEADERS = { 'x-llm-provider': 'zhipu', 'x-llm-key': 'sk-test' };
++
++  it('LLM 计划优先：工单 prompt 原样派发，reason 标「编排者拆解」', async () => {
++    vi.mocked(planWithLlm).mockResolvedValueOnce({
++      intent: 'task',
++      strategy: 'pipeline',
++      source: 'llm',
++      tasks: [
++        { agentId: 'pm', title: '整理需求', prompt: 'LLM工单A：整理需求文档' },
++        { agentId: 'dev', title: '实现接口', prompt: 'LLM工单B：实现登录接口', depends_on: ['pm'] },
++      ],
++    });
++    await runFanoutAsync('g1', 'byok:zhipu', undefined, LLM_HEADERS, '先整理需求再做接口');
++    expect(vi.mocked(planWithLlm)).toHaveBeenCalledTimes(1);
++    expect(ranAgents()).toEqual(['pm', 'dev']);
++    expect(turnPrompts[0]!.prompt).toContain('LLM工单A');
++    expect(turnPrompts[1]!.prompt).toContain('LLM工单B');
++    const reason = String(intentFrames()[0]?.reason ?? '');
++    expect(reason).toContain('编排者拆解');
++    expect(reason).toContain('流水线拆解');
++    // 编排者拿到的是带专长 soul 的完整花名册。
++    const arg = vi.mocked(planWithLlm).mock.calls[0]![0] as { agents: Array<{ id: string }>; provider: string; apiKey?: string };
++    expect(arg.agents.map((a) => a.id).sort()).toEqual(['design', 'dev', 'ops', 'pm']);
++    expect(arg.provider).toBe('zhipu');
++    expect(arg.apiKey).toBe('sk-test');
++  });
++
++  it('LLM 计划失败 → 启发式策略矩阵兜底（问答仍单人对口）', async () => {
++    await runFanoutAsync('g1', 'byok:zhipu', undefined, LLM_HEADERS, 'SQL 查询慢是什么原因？');
++    expect(vi.mocked(planWithLlm)).toHaveBeenCalledTimes(1);
++    expect(ranAgents()).toEqual(['dev']);
++    expect(turnPrompts[0]!.prompt).toContain('SQL');
++    expect(String(intentFrames()[0]?.reason ?? '')).toContain('策略矩阵路由');
++  });
++});
+diff --git a/server/src/routes/groups-chat.ts b/server/src/routes/groups-chat.ts
+index 9bf8ed0..5a52496 100644
+--- a/server/src/routes/groups-chat.ts
++++ b/server/src/routes/groups-chat.ts
+@@ -61,3 +61,14 @@
+ // Polynoia 对标（2026-08-15）— INTENT_PARSE 编排拆解 + worktree 隔离闭环 + git 证据。
+-import { decomposeWithLlm, type ParsedTask } from '../lib/orchestrator-parse';
++import { planWithLlm, type ParsedTask } from '../lib/orchestrator-parse';
++import {
++  allHandsPlan,
++  casualPlan,
++  describePlan,
++  heuristicPlan,
++  isCasualChat,
++  mentionPlan,
++  STRATEGY_LABELS,
++  type ChatPlan,
++  type StrategyAgent,
++} from '../lib/chat-strategy';
+ // 对话框知识库（2026-11-06）— 记忆库检索块（fail-soft），DAG/串行派发共用。
+@@ -745,23 +756,10 @@ async function integrateAndReport(
+   }
+ }
+ 
+-// ── 寒暄路由（2026-11-07 用户反馈：「hi 后所有 agent 都回复」不合理）────────
+-// 整条消息就是一句寒暄/应答（hi/你好/谢谢/收到/晚安…）→ 视为闲聊：只派一位
+-// 应答者接话（成员首位），不进 DAG 编排（无计划卡/交接链），像普通群聊一样
+-// 一人回复。@ 点名、任务消息行为不变（零回归）。
+-const CASUAL_LINE_RE =
+-  /^(?:hi+|hiya|hey+|hello+|yo|howdy|sup|hola|hello\s+there|good\s+(?:morning|afternoon|evening)|早上好|早安|早啊|早|中午好|下午好|晚上好|晚安|你好|您好|哈喽|嗨+|在吗|在么|在不在|thanks?|thank\s+(?:you|u)|thx+|tysm|ty|谢谢(?:你|您)?|多谢|感谢(?:你|您)?|辛苦了|麻烦了|ok(?:ay)?|好的?|好嘞|好滴|好哒|收到|明白|了解|没问题|嗯+|哦+|啊+|行|可以|拜拜|再见|88|回见|回头见)(?:[呀啦哦呢嘛呗哇吖!?！。.~～,，]*)$/i;
+-
+-/**
+- * 寒暄判定（纯函数，可单测）：整条消息是一句寒暄/应答 → true。
+- * 门槛：≤24 字、单行、无 @ 点名；任务/多行/点名消息一律走常规派发。
+- */
+-export function isCasualChat(text: string): boolean {
+-  const t = (text ?? '').trim();
+-  if (!t || t.length > 24) return false;
+-  if (/[\n@]/.test(t)) return false;
+-  return CASUAL_LINE_RE.test(t);
+-}
++// ── 寒暄判定（2026-11-07）— 实现已迁入 lib/chat-strategy（策略矩阵第一行，
++// 纯函数单测在 chat-strategy.test.ts）。此处兼容再导出：groups-chat-mention
++// .test.ts 等既有引用方仍从本模块导入。
++export { isCasualChat };
+ 
+ /**
+  * Background fan-out: generate + persist one reply per group agent.
+@@ -803,26 +801,19 @@ async function runFanout(
+           .reverse()
+           .find((m) => (m.sender_kind ?? 'user') === 'user')?.content ?? '');
+   const rosterCandidates: MentionCandidate[] = [];
++  const planRoster: StrategyAgent[] = [];
+   for (const id of allAgentIds) {
+     try {
+       const a = await pyGet<AgentRecord>(`/api/agents/${encodeURIComponent(id)}`);
+       rosterCandidates.push({ id, name: a?.name || id });
++      planRoster.push({ id, name: a?.name || id, soul: a?.soul ?? '' });
+     } catch {
+       rosterCandidates.push({ id, name: id });
++      planRoster.push({ id, name: id, soul: '' });
+     }
+   }
+   const { mentionedIds, cleanText } = parseMentions(userText, rosterCandidates);
+   const mentioned = new Set(mentionedIds);
+-  let agentIds = mentioned.size > 0 ? allAgentIds.filter((id) => mentioned.has(id)) : allAgentIds;
+-
+-  // ── 寒暄路由（2026-11-07）────────────────────────────────────────────────
+-  // 「hi/你好/谢谢」整条寒暄：不全员广播，只派成员首位单人接话（下方 DAG 分支
+-  // 同样跳过 → 走单人串行，无计划卡/交接链/派发卡）。@ 点名或任务消息不受影响。
+-  const casual = mentioned.size === 0 && isCasualChat(userText);
+-  if (casual && agentIds.length > 1) {
+-    agentIds = [agentIds[0]];
+-  }
+-
+   // @ 未命中可见提示（零 LLM）：消息里有 @token 但一个都没对上成员 → 用户
+   // 以为在点名、系统却全员派发，这是演示里最容易被问「为什么 @ 没生效」的
+   // 场景。落一条 system 提示（可解释性 > 沉默降级）。纯文本无 @ → 不打扰。
+@@ -836,6 +827,40 @@ async function runFanout(
+     }).catch(() => {});
+   }
+ 
++  // ── 意图识别 + 策略矩阵（2026-11-07，GrokBot 群聊范式）──────────────────
++  // 用户消息 → 意图（寒暄/问答/讨论/任务）→ 策略矩阵定协作策略（单人应答/
++  // 专家应答/流水线/并行拆分/圆桌/全员）→ 工单拆解（LLM 编排者优先，启发式
++  // 兜底）——**任何路径都不再「原文分发给全体成员」**。@ 点名 = 用户亲自调度
++  // （GrokBot「单点 @ 串行交接」语义），定向派活跳过拆解。
++  const parseProvider = executor.startsWith('byok:')
++    ? executor.slice(5)
++    : executor === 'anthropic-direct'
++      ? 'anthropic'
++      : null;
++  let plan: ChatPlan | null = null;
++  if (mentioned.size > 0) {
++    plan = mentionPlan(userText, cleanText, planRoster, [...mentioned]);
++  } else if (isCasualChat(userText)) {
++    plan = casualPlan(userText, planRoster);
++  } else if (hasAtToken) {
++    // @ 全未命中（上方已发提示）→ 全员参与（既有「按常规流程派发」语义）。
++    plan = allHandsPlan(userText, planRoster);
++  } else if (parseProvider && apiKey && isProviderId(parseProvider) && userText.trim()) {
++    plan = await planWithLlm({
++      userText,
++      agents: planRoster,
++      provider: parseProvider,
++      apiKey,
++      model,
++    });
++  }
++  if (!plan) plan = heuristicPlan(userText, planRoster);
++  const casual = plan.intent === 'casual';
++  const planTaskByAgent = new Map<string, ParsedTask>(plan.tasks.map((t) => [t.agentId, t]));
++  const agentIds = [...new Set(plan.tasks.map((t) => t.agentId))];
++  if (agentIds.length === 0) agentIds.push(allAgentIds[0]); // 防御：至少一人应答
++  const planNameOf = (id: string): string => planRoster.find((a) => a.id === id)?.name ?? id;
++
+   // B3 · 网关过程事件 — 本轮 fan-out 开一条 gateway run（互链 conversation 下），
+   // 执行期过程经 run 管线 emit；B2 GET /:id/timeline 自动归并回放。
+   // startGatewayRun 失败返回 null（聊天主链路照常），所有 gw 操作 `gw?.` 防御。
+@@ -859,32 +884,32 @@ async function runFanout(
+     if (!casual && shouldRunTeamDag(group)) {
+       const { team } = loadTeamForRun(group.team_id!);
+       if (team && team.members.length > 0) {
+-        // ── @ 提及定向派活（OpenBot 语义）─────────────────────────────────
+-        // 有命中提及 → 团队收缩为被提及节点的诱导子图（成员/边双裁剪，conditional
+-        // 返工边保留），且跳过 LLM 意图拆解（点名即完整任务说明，无需再拆）。
++        // ── 指派集合 → 团队子图收缩（@ 提及同款诱导子图：成员/边双裁剪，
++        // conditional 返工边保留）。策略矩阵/点名/拆解只指派子集时，未被
++        // 指派的成员不进执行图（不再「原文全员广播」）；全员策略或指派覆盖
++        // 全体 → 整图；指派全不在 team 名单（如 @ 的是非团队成员）→ 当没
++        // 提过（回落整图 + 原文，既有语义）。
+         const fullRoster = team;
+-        const team2 =
+-          mentioned.size > 0 ? restrictTeamToMentions(fullRoster, [...mentioned]) : fullRoster;
+-        const mentionRouted = mentioned.size > 0 && team2.members.length > 0;
+-        const effTeam = mentionRouted ? team2 : fullRoster;
+-        if (!mentionRouted) {
+-          // 提及了成员但一个都不在 team 名单里（如 @ 的是非团队成员）→ 当没提过。
+-          mentioned.clear();
+-        }
++        const assignedInTeam = fullRoster.members.filter((id) => planTaskByAgent.has(id));
++        const routedToSubset =
++          plan.strategy !== 'all-hands' &&
++          assignedInTeam.length > 0 &&
++          assignedInTeam.length < fullRoster.members.length;
++        const effTeam = routedToSubset
++          ? restrictTeamToMentions(fullRoster, assignedInTeam)
++          : fullRoster;
+ 
+         // group 已在 runFanout 顶部加载(含 messages);DAG 用单次快照即可(上游上下文经 upstream 参数流转,不靠 history)。
+         const history0 = toHistory(group.messages);
+         const latestUser0 = [...history0].reverse().find((m) => m.role === 'user');
+-        // 提及路由时用清洗文本（去掉 @token）当派发 prompt，Agent 不被 @噪音干扰。
++        // 点名路由时用清洗文本（去掉 @token）当派发 prompt，Agent 不被 @噪音干扰。
+         const userPrompt =
+-          (mentionRouted ? cleanText : '')
++          (plan.source === 'mention' ? cleanText : '')
+             || latestUser0?.blocks.map((b) => (b.kind === 'text' ? b.text : '')).join('')
+             || '';
+ 
+-        // ── Polynoia INTENT_PARSE（2026-08-15）─────────────────────────────
+-        // 编排者前置拆解：BYOK 有 key 时用 LLM 把用户消息拆成 per-agent 子任务
+-        // prompt（生成合适 prompt 分阶段派发）；任何失败 → null → 降级为原文
+-        // 分发（现状行为，零回归）。@ 提及定向派活时跳过（点名即任务说明）。
++        // ── 拆解已上移到 runFanout 顶部（plan：点名/寒暄/群呼/LLM/启发式）──
++        // 此处只解析 effTeam roster 供卡片名解析。
+         const rosterEntries = await Promise.all(
+           effTeam.members.map(async (id) => {
+             const a = await pyGet<AgentRecord>(`/api/agents/${encodeURIComponent(id)}`).catch(() => null);
+@@ -894,53 +919,20 @@ async function runFanout(
+         const roster = rosterEntries.filter((r): r is { id: string; name: string; soul: string } => r !== null);
+         const rosterName = (id: string): string => roster.find((r) => r.id === id)?.name ?? id;
+ 
+-        const parseProvider = executor.startsWith('byok:')
+-          ? executor.slice(5)
+-          : executor === 'anthropic-direct'
+-            ? 'anthropic'
+-            : null;
+-        let parsedTasks: ParsedTask[] | null = null;
+-        if (
+-          !mentionRouted &&
+-          parseProvider && apiKey && isProviderId(parseProvider) && userPrompt.trim()
+-        ) {
+-          parsedTasks = await decomposeWithLlm({
+-            userText: userPrompt,
+-            agents: roster,
+-            provider: parseProvider,
+-            apiKey,
+-            model,
+-          });
+-        }
+-        const taskByAgent = new Map<string, ParsedTask>();
+-        if (parsedTasks) for (const t of parsedTasks) taskByAgent.set(t.agentId, t);
+-
+         // ── DISPATCH 决策可见化：intent 帧（NeverRaising）───────────────────
+-        // 用户说一句话后能立刻看到「派给了谁、为什么」：拆解成功 → 团队 +
+-        // per-agent 明细；拆解不可用（无 key/失败）→ 团队 + 降级原因。卡片本体
+-        // 由前端 NeoGroupChat 的 NeoDispatchCard 渲染。
++        // 用户说一句话后能立刻看到「派给了谁、为什么」：意图 · 策略 · 参与者
++        // （点名 / 编排者拆解 / 策略矩阵来源统一经 describePlan 解释）。卡片
++        // 本体由前端 NeoGroupChat 的 NeoDispatchCard 渲染（后台折叠行内）。
+         emitIntentCard(gw, {
+           intent: userPrompt,
+           target_kind: 'team',
+           target_name: team.name ?? group.team_id!,
+-          reason: mentionRouted
+-            ? `用户点名 @${mentionedIds
+-                .map((id) => rosterName(id))
+-                .join('、')}，定向派发（跳过意图拆解）`
+-            : parsedTasks
+-              ? `编排者拆解为 ${parsedTasks.length} 个子任务，按 DAG 分层派发`
+-              : '拆解不可用（无 BYOK key 或解析失败），用户原文分发给全体成员',
+-          assignments: mentionRouted
+-            ? effTeam.members.map((id) => ({
+-                agent_id: id,
+-                name: rosterName(id),
+-                title: '定向派活',
+-              }))
+-            : parsedTasks?.map((t) => ({
+-                agent_id: t.agentId,
+-                name: rosterName(t.agentId),
+-                title: t.title,
+-              })),
++          reason: describePlan(plan, rosterName),
++          assignments: plan.tasks.map((t) => ({
++            agent_id: t.agentId,
++            name: rosterName(t.agentId),
++            title: t.title,
++          })),
+         });
+ 
+         // ── DISPATCH 可视化：plan_card（层号 = 并行批次）───────────────────
+@@ -1121,4 +1121,4 @@ async function runFanout(
+               planTasks.push({
+                 id: `node:${id}`,
+-                title: taskByAgent.get(id)?.title ?? rosterName(id),
++                title: planTaskByAgent.get(id)?.title ?? rosterName(id),
+                 assignee: rosterName(id),
+@@ -966,7 +958,10 @@ async function runFanout(
+               kind: 'plan_card',
+               turn_id: gw.turnId,
+               ts: Date.now(),
+-              title: '编排计划',
++              title:
++                plan.tasks.length > 1
++                  ? `编排计划 · ${STRATEGY_LABELS[plan.strategy]}`
++                  : '编排计划',
+               ...(userPrompt ? { goal: userPrompt } : {}),
+               tasks: planTasks,
+             });
+@@ -1217,4 +1217,4 @@ async function runFanout(
+-            // INTENT_PARSE 产物优先 — 编排者拆出的 per-agent 子任务 prompt；
+-            // 无拆解（无 key/失败/未分配）→ 用户原文（现状）。
+-            const task = taskByAgent.get(agentId);
++            // 意图路由工单 prompt 优先（策略矩阵/点名/编排者拆解给该 agent 的
++            // 自包含指令）；未分配（指派全不在 team 名单的整图回落）→ 用户原文。
++            const task = planTaskByAgent.get(agentId);
+             const basePrompt = task ? task.prompt : userPrompt;
+@@ -1320,9 +1315,11 @@ async function runFanout(
+       const fresh = await pyGet<GroupRecord>(`/api/groups/${encodeURIComponent(groupId)}`);
+       const history = toHistory(fresh?.messages);
+       const latestUser = [...history].reverse().find((m) => m.role === 'user');
+-      // @ 提及路由时用清洗文本（@token 已删）当 prompt，Agent 不吃 @ 噪音。
++      // 意图路由工单 prompt 优先（策略矩阵/点名/拆解给该 agent 的自包含指令）；
++      // 兜底：点名清洗文本（@token 已删）→ 会话里的用户原文。
+       const prompt =
+-        (mentioned.size > 0 ? cleanText : '')
++        planTaskByAgent.get(agentId)?.prompt
++          || (plan.source === 'mention' ? cleanText : '')
+           || latestUser?.blocks.map((b) => (b.kind === 'text' ? b.text : '')).join('')
+           || '';
+       if (prompt) serialPrompt = prompt;
+@@ -1348,9 +1345,11 @@ async function runFanout(
+           intent: prompt,
+           target_kind: 'agent',
+           target_name: agentName,
+-          reason: mentioned.size > 0
+-            ? '用户点名，定向派发（群未绑定团队）'
+-            : '群未绑定团队，按成员依次处理用户原文',
++          reason: `${describePlan(plan, planNameOf)}${
++            plan.tasks.length > 1 && planTaskByAgent.has(agentId)
++              ? ` · 工单：${planTaskByAgent.get(agentId)!.title}`
++              : ''
++          }`,
+         });
+       }
+ 

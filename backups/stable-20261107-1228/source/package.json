@@ -1,0 +1,11 @@
+{
+  "name": "shadowflow-integration-workspace",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node start-dev.mjs",
+    "build": "npm --prefix shadowflow-react run build",
+    "check:gateway": "npm --prefix ShadowFlow-backend/server run build"
+  }
+}

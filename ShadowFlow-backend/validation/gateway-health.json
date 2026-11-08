@@ -1,0 +1,8 @@
+{
+  "status": "ok",
+  "server": "shadowflow-api",
+  "version": "1.0.0",
+  "port": 8002,
+  "anthropic_key_configured": false,
+  "timestamp": "2026-11-06T21:32:25.498Z"
+}

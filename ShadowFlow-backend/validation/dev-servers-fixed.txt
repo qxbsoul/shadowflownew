@@ -1,0 +1,54 @@
+
+[1m  ShadowFlow Backend Dev[0m
+  ────────────────────────────────────────────
+  [36mNode 网关[0m  http://localhost:8002/health
+  [36mPython API[0m  http://localhost:8000/docs
+  [2mCtrl+C 停止全部服务[0m
+
+[2m  [py] D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\.venv\Scripts\python.exe[0m
+[2m  [gw] tsx watch server/src/index.ts[0m
+
+[34m[py][0m [33mINFO:     Will watch for changes in these directories: ['D:\\KimiData\\kimi\\tasks\\2026-11-07\\00-53-34-e44badec\\ShadowFlow-backend'][0m
+[34m[py][0m [33mINFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)[0m
+[34m[py][0m [33mINFO:     Started reloader process [23340] using StatReload[0m
+[34m[py][0m [33mINFO:     Started server process [14432][0m
+[34m[py][0m [33mINFO:     Waiting for application startup.[0m
+[34m[py][0m [33mShadowFlow starting without server-side keys: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY. UI will prompt the user to paste keys into localStorage (BYOK).[0m
+[34m[py][0m [33mShadowFlow: agent 'shadowsoul' unavailable ('shadow' not found in PATH). Templates using this provider will degrade to fallback executor.[0m
+[34m[py][0m [33mShadowFlow: agent 'hermes' unavailable ('hermes' not found in PATH). Templates using this provider will degrade to fallback executor.[0m
+[34m[py][0m [33mShadowFlow: agent 'openclaw' unavailable ('openclaw' not found in PATH). Templates using this provider will degrade to fallback executor.[0m
+[32m[gw][0m [sqlite] db loaded at D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\server\.shadowflow\app.sqlite
+[32m[gw][0m [index] static /projects → D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\server\.shadowflow\projects
+[32m[gw][0m [skill-loader] loaded 6 skill(s) from D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\server\skills
+[32m[gw][0m [skill-loader] loaded 9 skill(s) from D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\.shadowflow\skills
+[32m[gw][0m [index] skill-loader: 9 loaded, 0 error(s)
+[32m[gw][0m [design-system-loader] loaded 4 design system(s) from D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\server\.shadowflow\design-systems
+[32m[gw][0m [design-system-loader] override hardcoded DS: material
+[32m[gw][0m [design-system-loader] override hardcoded DS: none
+[32m[gw][0m [design-system-loader] override hardcoded DS: shadcn
+[32m[gw][0m [design-system-loader] override hardcoded DS: tailwind
+[32m[gw][0m [index] design-system-loader: 4 loaded, 0 error(s), override: material, none, shadcn, tailwind
+[34m[py][0m [33mINFO:     Application startup complete.[0m
+[32m[gw][0m ╔══════════════════════════════════════════════════════╗
+[32m[gw][0m ║          ShadowFlow API Server — Port 8002          ║
+[32m[gw][0m ╚══════════════════════════════════════════════════════╝
+[32m[gw][0m   Mode     : BYOK (user-supplied key)
+[32m[gw][0m   CORS     : http://localhost:3007
+[32m[gw][0m   Health   : http://localhost:8002/health
+[32m[gw][0m   Sessions : http://localhost:8002/api/run-sessions
+[34m[py][0m INFO:     127.0.0.1:63511 - "GET /docs HTTP/1.1" 200 OK
+[32m✓[0m Python 就绪 :8000
+[32m[gw][0m [session-store] loaded 4 session(s) from D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\server\.shadowflow\sessions
+[32m[gw][0m [index] cli-detector: 0/22 CLI(s) detected
+[32m[gw][0m [index] acp-detector: 0/2 agent(s) installed
+[32m[gw][0m [2026-11-06T21:32:25.237Z] GET /health
+[32m[gw][0m [2026-11-06T21:32:25.289Z] GET /health
+[32m✓[0m 网关就绪 :8002
+
+[32m✓[0m 后端全部就绪
+  新前端统一入口: [1mhttp://localhost:8002[0m
+  Python OpenAPI:  [1mhttp://localhost:8000/docs[0m
+[34m[py][0m INFO:     127.0.0.1:63518 - "GET / HTTP/1.1" 200 OK
+[32m[gw][0m [2026-11-06T21:32:25.498Z] GET /health
+[34m[py][0m INFO:     127.0.0.1:63518 - "GET / HTTP/1.1" 200 OK
+[34m[py][0m INFO:     127.0.0.1:63520 - "GET /openapi.json HTTP/1.1" 200 OK

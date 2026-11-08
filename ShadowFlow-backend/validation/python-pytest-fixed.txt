@@ -1,0 +1,303 @@
+D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\.venv\Lib\site-packages\pytest_asyncio\plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+============================= test session starts =============================
+platform win32 -- Python 3.12.15, pytest-9.2.0, pluggy-1.7.0
+rootdir: D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend
+configfile: pyproject.toml
+testpaths: tests
+plugins: anyio-4.16.0, platformdirs-4.14.5, asyncio-1.4.1.post1, cov-7.1.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 2388 items
+
+tests\api\test_chat_completions.py ...............                       [  0%]
+tests\api\test_opc_os.py ..............                                  [  1%]
+tests\api\test_team_policy_workflow.py .............                     [  1%]
+tests\api\test_team_validation_hooks.py .............                    [  2%]
+tests\llm\test_tool_use.py ............                                  [  2%]
+tests\mcp_servers\test_fs_server.py .........................            [  3%]
+tests\mcp_servers\test_shell_server.py ................................. [  5%]
+....                                                                     [  5%]
+tests\mcp_servers\test_web_server.py .............                       [  5%]
+tests\runtime\test_react_loop.py ........                                [  6%]
+tests\runtime\test_validation_hooks_schema.py ..................         [  7%]
+tests\test_a2a_bridge.py .............................................   [  8%]
+tests\test_acp_approval_bridge.py ..........                             [  9%]
+tests\test_acp_client_session.py .............                           [  9%]
+tests\test_acp_failure.py ...........                                    [ 10%]
+tests\test_acp_server.py ............................                    [ 11%]
+tests\test_acp_transport.py .......                                      [ 11%]
+tests\test_adoption_items.py .............                               [ 12%]
+tests\test_agent_event_namespace.py ..........                           [ 12%]
+tests\test_agent_executor_contract.py ............                       [ 13%]
+tests\test_agent_plugin_contract.py .................................... [ 14%]
+...                                                                      [ 14%]
+tests\test_agentteams_bridge.py ....                                     [ 15%]
+tests\test_agentteams_package.py .......                                 [ 15%]
+tests\test_approval_gate.py ................                             [ 16%]
+tests\test_approvals_api.py ..............                               [ 16%]
+tests\test_archive_api.py ......                                         [ 16%]
+tests\test_artifact_pins.py .........                                    [ 17%]
+tests\test_assembly.py ........                                          [ 17%]
+tests\test_assembly_activation.py ....................                   [ 18%]
+tests\test_builder_api.py ......................                         [ 19%]
+tests\test_builder_contracts.py ....................                     [ 20%]
+tests\test_builder_import_agent.py ..........                            [ 20%]
+tests\test_builder_promote_from_agent.py ......                          [ 20%]
+tests\test_builder_promote_schema.py ..........                          [ 21%]
+tests\test_builder_publish.py ........                                   [ 21%]
+tests\test_builder_scope_framing.py ................                     [ 22%]
+tests\test_builder_service.py ........................                   [ 23%]
+tests\test_builder_service_prompt.py ...                                 [ 23%]
+tests\test_builder_smoke_workflow_binding.py ........                    [ 23%]
+tests\test_catalog_api.py ...........                                    [ 24%]
+tests\test_catalog_fork_team.py ......                                   [ 24%]
+tests\test_catalog_service.py ....................                       [ 25%]
+tests\test_chat_bridge.py .........                                      [ 25%]
+tests\test_checkpoint_resume.py .......................                  [ 26%]
+tests\test_citation_api.py ........                                      [ 26%]
+tests\test_citation_service.py ....................                      [ 27%]
+tests\test_cli_agent_executor.py ............                            [ 28%]
+tests\test_cli_executor_legacy.py ...........                            [ 28%]
+tests\test_cli_run.py ........                                           [ 29%]
+tests\test_compile_agents.py ............                                [ 29%]
+tests\test_connection_resolver_v2.py ......................              [ 30%]
+tests\test_context_builder.py ............                               [ 31%]
+tests\test_eval_api.py ..............                                    [ 31%]
+tests\test_eval_profile.py .............                                 [ 32%]
+tests\test_eval_service.py ...................                           [ 32%]
+tests\test_events_bus.py .............................                   [ 34%]
+tests\test_executor_registry.py ..........                               [ 34%]
+tests\test_gap_response.py ......                                        [ 34%]
+tests\test_generate_ts_types.py .........s...                            [ 35%]
+tests\test_group_chat_realtime.py ............                           [ 35%]
+tests\test_groups_api.py .......                                         [ 36%]
+tests\test_groups_archive.py ....                                        [ 36%]
+tests\test_groups_reactions.py .......                                   [ 36%]
+tests\test_groups_settings.py ............                               [ 37%]
+tests\test_groups_thread.py ......                                       [ 37%]
+tests\test_health_shadowsoul.py ............                             [ 37%]
+tests\test_hermes_adapter.py .....................                       [ 38%]
+tests\test_hier_index.py .............                                   [ 39%]
+tests\test_highlevel_schema.py ...........................               [ 40%]
+tests\test_hook_pipeline_and_bundle.py ............                      [ 40%]
+tests\test_inbox_api.py ........                                         [ 41%]
+tests\test_ingest_pipeline.py ......................                     [ 42%]
+tests\test_kit_api.py .................                                  [ 42%]
+tests\test_kit_eval_packs.py ................                            [ 43%]
+tests\test_kit_instantiate_endpoints.py .......                          [ 43%]
+tests\test_kit_registry.py ....................                          [ 44%]
+tests\test_kit_regression.py .......                                     [ 45%]
+tests\test_kit_smoke_runner.py ......                                    [ 45%]
+tests\test_knowledge_api.py ..................                           [ 46%]
+tests\test_knowledge_assistant_kit.py .................................. [ 47%]
+...............                                                          [ 48%]
+tests\test_knowledge_assistant_kit_eval.py .............                 [ 48%]
+tests\test_knowledge_assistant_policy.py .........................       [ 49%]
+tests\test_knowledge_assistant_policy_enforcer.py ...................    [ 50%]
+tests\test_knowledge_graph.py ...                                        [ 50%]
+tests\test_knowledge_grounded_loop.py ...                                [ 50%]
+tests\test_knowledge_pack.py ...........                                 [ 51%]
+tests\test_knowledge_query_api.py ...........                            [ 51%]
+tests\test_lightrag_adapter.py .........ssss.......sss                   [ 52%]
+tests\test_lineage.py ...........................                        [ 53%]
+tests\test_llm_fallback.py .......                                       [ 54%]
+tests\test_loop_engine_advanced.py .......                               [ 54%]
+tests\test_loop_engine_attribution.py .....                              [ 54%]
+tests\test_loop_engine_contracts.py ..........                           [ 54%]
+tests\test_loop_engine_control_loop.py .........                         [ 55%]
+tests\test_loop_engine_cybernetic.py ....                                [ 55%]
+tests\test_loop_engine_dag.py ................                           [ 56%]
+tests\test_loop_engine_iterative_reject.py ...                           [ 56%]
+tests\test_loop_engine_seed_lite.py ..                                   [ 56%]
+tests\test_mcp_agent_executor.py ................                        [ 57%]
+tests\test_mcp_client_connect.py .............                           [ 57%]
+tests\test_mcp_errors.py ...........                                     [ 58%]
+tests\test_memory_api.py ...................                             [ 58%]
+tests\test_memory_bridge_circuit_breaker.py .........                    [ 59%]
+tests\test_memory_bridge_drink.py ............                           [ 59%]
+tests\test_memory_bridge_feedback.py .........                           [ 60%]
+tests\test_memory_bridge_pour.py ...........                             [ 60%]
+tests\test_memory_bridge_round3_patches.py ...........                   [ 61%]
+tests\test_memory_bridge_round4_patches.py .........                     [ 61%]
+tests\test_memory_profile.py ..........                                  [ 61%]
+tests\test_message_feedback.py ..........                                [ 62%]
+tests\test_openapi_contract.py .                                         [ 62%]
+tests\test_ops_api.py .......                                            [ 62%]
+tests\test_pack_graph.py .......................                         [ 63%]
+tests\test_parallel_gather.py ...                                        [ 63%]
+tests\test_persona_npc_eval.py ..................................        [ 65%]
+tests\test_persona_npc_kit.py .......................................... [ 66%]
+...................                                                      [ 67%]
+tests\test_persona_npc_kit_eval.py ........                              [ 67%]
+tests\test_phase2_feedback_wireback.py ......                            [ 68%]
+tests\test_phase3_learner.py ........                                    [ 68%]
+tests\test_plugin_package.py .....                                       [ 68%]
+tests\test_policy_matrix.py ...........................                  [ 69%]
+tests\test_policy_obs.py ......                                          [ 70%]
+tests\test_policy_runtime_update.py ................                     [ 70%]
+tests\test_provider_preset_override.py ............                      [ 71%]
+tests\test_quick_create_api.py ......................                    [ 72%]
+tests\test_quick_create_contract.py .......                              [ 72%]
+tests\test_rag_executor.py .....                                         [ 72%]
+tests\test_rate_limiting.py .......                                      [ 73%]
+tests\test_registry_api.py .......................                       [ 73%]
+tests\test_regression_api.py .......                                     [ 74%]
+tests\test_regression_service.py ...........                             [ 74%]
+tests\test_reject_runtime.py ...............                             [ 75%]
+tests\test_research_kit.py .................................             [ 76%]
+tests\test_research_kit_smoke.py ........................                [ 77%]
+tests\test_review_approval_kit.py ...................................... [ 79%]
+.                                                                        [ 79%]
+tests\test_review_approval_smoke.py ........................             [ 80%]
+tests\test_river_memory.py .......                                       [ 80%]
+tests\test_run_event_log.py ............                                 [ 81%]
+tests\test_runs_evidence_api.py ................                         [ 81%]
+tests\test_runtime_adapters.py .......                                   [ 82%]
+tests\test_runtime_contract.py .....................                     [ 83%]
+tests\test_runtime_engine_contracts.py ..........                        [ 83%]
+tests\test_runtime_examples.py .........................                 [ 84%]
+tests\test_runtime_executors.py ..............                           [ 85%]
+tests\test_runtime_markdown_cli.py ..                                    [ 85%]
+tests\test_sanitize.py ................................................. [ 87%]
+.....                                                                    [ 87%]
+tests\test_schedules_api.py ......................                       [ 88%]
+tests\test_sessions_api.py ......................                        [ 89%]
+tests\test_sfagent_import_upload.py ...                                  [ 89%]
+tests\test_shadowsoul_fallback.py .......                                [ 89%]
+tests\test_sse_endpoint.py .............                                 [ 90%]
+tests\test_state_api.py .............                                    [ 90%]
+tests\test_state_service.py ...................                          [ 91%]
+tests\test_team_validation.py ........................                   [ 92%]
+tests\test_team_workflow_versions.py .........                           [ 92%]
+tests\test_teams_api.py ....................                             [ 93%]
+tests\test_teams_validation_api.py ..............                        [ 94%]
+tests\test_template_custom_api.py .......                                [ 94%]
+tests\test_template_schema.py .....................                      [ 95%]
+tests\test_templates_smoke.py ...........                                [ 96%]
+tests\test_tool_credentials.py ...........                               [ 96%]
+tests\test_tool_permission_rules.py ...........                          [ 96%]
+tests\test_tool_registry_api.py ................                         [ 97%]
+tests\test_trajectory_export.py ...........................              [ 98%]
+tests\test_verifier_byok.py .......                                      [ 99%]
+tests\test_workspace_id_normalization.py ........                        [ 99%]
+tests\test_workspaces_api.py ...............                             [100%]
+
+============================== warnings summary ===============================
+shadowflow\runtime\acp\server.py:43
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\shadowflow\runtime\acp\server.py:43: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    class AgentSession(BaseModel):
+
+shadowflow\server.py:335
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\shadowflow\server.py:335: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+.venv\Lib\site-packages\fastapi\applications.py:4723
+.venv\Lib\site-packages\fastapi\applications.py:4723
+.venv\Lib\site-packages\fastapi\applications.py:4723
+.venv\Lib\site-packages\fastapi\applications.py:4723
+.venv\Lib\site-packages\fastapi\applications.py:4723
+.venv\Lib\site-packages\fastapi\applications.py:4723
+.venv\Lib\site-packages\fastapi\applications.py:4723
+.venv\Lib\site-packages\fastapi\applications.py:4723
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\.venv\Lib\site-packages\fastapi\applications.py:4723: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)  # ty: ignore[deprecated]
+
+shadowflow\server.py:350
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\shadowflow\server.py:350: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+shadowflow\server.py:362
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\shadowflow\server.py:362: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+shadowflow\server.py:372
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\shadowflow\server.py:372: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+shadowflow\server.py:389
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\shadowflow\server.py:389: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+shadowflow\server.py:405
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\shadowflow\server.py:405: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+shadowflow\server.py:421
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\shadowflow\server.py:421: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+shadowflow\server.py:460
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\shadowflow\server.py:460: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("shutdown")
+
+tests/test_adoption_items.py::test_permission_prompt_waits_for_approval
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\shadowflow\runtime\permissions.py:73: RuntimeWarning: coroutine 'HangingWebSocket.receive_text' was never awaited
+    async def enforce_permission(
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_loop_engine_iterative_reject.py::test_reject_loop_iteration_seeds_checkpoint_with_progress
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\.venv\Lib\site-packages\_pytest\python.py:191: PytestReturnNotNoneWarning: Test functions should return None, but tests/test_loop_engine_iterative_reject.py::test_reject_loop_iteration_seeds_checkpoint_with_progress returned <class 'tuple'>.
+  Did you mean to use `assert` instead of `return`?
+  See https://docs.pytest.org/en/stable/how-to/assert.html#return-not-none for more information.
+    warnings.warn(
+
+tests/test_sse_endpoint.py::TestSseEndpointHeaders::test_sse_endpoint_returns_200_for_closed_run
+tests/test_sse_endpoint.py::TestSseEndpointHeaders::test_sse_endpoint_content_type_is_event_stream
+tests/test_sse_endpoint.py::TestSseEndpointHeaders::test_sse_endpoint_delivers_pre_published_events
+tests/test_sse_endpoint.py::TestSseEndpointHeaders::test_sse_last_event_id_reconnection
+tests/test_sse_endpoint.py::TestSseNodeLifecycleEvents::test_node_started_event_delivered_as_sse
+tests/test_sse_endpoint.py::TestSseNodeLifecycleEvents::test_sse_cache_control_headers_present
+tests/test_sse_endpoint.py::TestSseNodeLifecycleEvents::test_multiple_clients_get_independent_queues
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow-backend\.venv\Lib\site-packages\httpx2\_client.py:1112: StarletteDeprecationWarning: You should not use the 'timeout' argument with the TestClient. See https://github.com/Kludex/starlette/issues/1108 for more information.
+    return self.request(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+========== 2380 passed, 8 skipped, 26 warnings in 189.00s (0:03:08) ===========

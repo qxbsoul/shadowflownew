@@ -1,0 +1,17 @@
+{
+  "name": "ShadowFlow",
+  "version": "0.3.0",
+  "status": "running",
+  "capabilities": {
+    "runtime": true,
+    "workflow_graph": true,
+    "run_panel": true,
+    "chat_session": true
+  },
+  "warning": "API key missing",
+  "missing_keys": [
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY"
+  ]
+}

@@ -1,0 +1,1317 @@
+diff --git a/server/src/lib/__tests__/gateway-run.test.ts b/server/src/lib/__tests__/gateway-run.test.ts
+index 672bb67..db05a81 100644
+--- a/server/src/lib/__tests__/gateway-run.test.ts
++++ b/server/src/lib/__tests__/gateway-run.test.ts
+@@ -268,6 +268,92 @@ describe('emit → runBus 事件日志 → B2 读回', () => {
+     expect(think).toMatchObject({ kind: 'thinking', status: 'done', duration_ms: 999 });
+     // 清扫没有追加任何额外 thinking_finalize（duration_ms 仍是生产者的 999）。
+   });
++
++  // 2026-11-07 hop 卡收口 — 崩溃/中断时 hop 的 settle 从未发生，SQLite 侧有
++  // sweepOrphanHops 兜底，日志侧此前无人收口 → 回放 hop 卡永卡 pending/「交接中」。
++  it('finish 兜底清扫：未 settle 的 hop_card 补 hop_update aborted 终态', () => {
++    const groupId = 'g-sweep-hop-' + Date.now();
++    const gw = gatewayRun.startGatewayRun(groupId, '中断轮')!;
++    const hopId = gw.nextId();
++    gw.emitMessage({
++      id: hopId,
++      kind: 'hop_card',
++      turn_id: gw.turnId,
++      ts: Date.now() - 5_000,
++      from_agent: 'a1',
++      to_agent: 'a2',
++      from_name: '小张',
++      to_name: '小李',
++      status: 'pending',
++    });
++    // start 已播报「交接中」，但 settle 永远没来（进程中断）。
++    gw.emitPatch({ id: hopId, op: 'hop_update', patch: { status: 'running' } });
++
++    const before = timelineReplay.replayTimeline(
++      runSessions.getRunReplay(gw.sessionId)!.events,
++    );
++    expect(before.find((m) => m.id === hopId)).toMatchObject({ status: 'running' });
++
++    gw.finish('canceled');
++
++    const replay = runSessions.getRunReplay(gw.sessionId)!;
++    const after = timelineReplay.replayTimeline(replay.events);
++    const hop = after.find((m) => m.id === hopId)!;
++    expect(hop).toMatchObject({ kind: 'hop_card', status: 'aborted' });
++    if (hop.kind === 'hop_card') {
++      expect(hop.detail).toBeTruthy();
++      expect(typeof hop.duration_ms === 'number').toBe(true);
++    }
++    // 补丁只发一条（aborted 终态）。
++    const terminalPatches = replay.events.filter(
++      (e) =>
++        e.event === 'message-patch' &&
++        (e.data as { id?: string; op?: string; patch?: { status?: string } }).id === hopId &&
++        (e.data as { op?: string }).op === 'hop_update' &&
++        (e.data as { patch?: { status?: string } }).patch?.status === 'aborted',
++    );
++    expect(terminalPatches).toHaveLength(1);
++  });
++
++  it('终态清扫不改写已 settle 的 hop 卡（done 结算原样保留）', () => {
++    const groupId = 'g-sweep-hop-idem-' + Date.now();
++    const gw = gatewayRun.startGatewayRun(groupId, '正常轮')!;
++    const hopId = gw.nextId();
++    gw.emitMessage({
++      id: hopId,
++      kind: 'hop_card',
++      turn_id: gw.turnId,
++      ts: Date.now() - 1_000,
++      from_agent: 'a1',
++      to_agent: 'a2',
++      from_name: '小张',
++      to_name: '小李',
++      status: 'pending',
++    });
++    gw.emitPatch({
++      id: hopId,
++      op: 'hop_update',
++      patch: { status: 'done', output_chars: 42, duration_ms: 800 },
++    });
++    gw.finish('succeeded');
++
++    const replay = runSessions.getRunReplay(gw.sessionId)!;
++    const after = timelineReplay.replayTimeline(replay.events);
++    expect(after.find((m) => m.id === hopId)).toMatchObject({
++      kind: 'hop_card',
++      status: 'done',
++      output_chars: 42,
++      duration_ms: 800,
++    });
++    // 清扫没有追加 aborted 改写（该卡 hop_update 补丁仍只有生产者那一条）。
++    const hopPatches = replay.events.filter(
++      (e) =>
++        e.event === 'message-patch' &&
++        (e.data as { id?: string }).id === hopId &&
++        (e.data as { op?: string }).op === 'hop_update',
++    );
++    expect(hopPatches).toHaveLength(1);
++  });
+ });
+ 
+ describe('失败语义 — 绝不反向破坏聊天主链路', () => {
+diff --git a/server/src/lib/__tests__/run-event-bus-sweep.test.ts b/server/src/lib/__tests__/run-event-bus-sweep.test.ts
+new file mode 100644
+index 0000000..28b9724
+--- /dev/null
++++ b/server/src/lib/__tests__/run-event-bus-sweep.test.ts
+@@ -0,0 +1,173 @@
++/**
++ * run-event-bus-sweep.test.ts — 终态清扫 sweepOpenProcessCards 的 hop 卡收口
++ * 与幂等回归（2026-11-07，DAG 每小时优化③）。
++ *
++ * 背景：hop_card 帧（pending→running→终态）经 gateway run 写进 run 事件日志，
++ * settle 的 hop_update patch 也在同一日志。崩溃/kill 时 settle 永远不来 ——
++ * SQLite 侧有 sweepOrphanHops 补 aborted，但**重放可见的日志侧**此前无人
++ * 收口：回放 hop 卡永卡 pending/「交接中」。sweepOpenProcessCards 现对
++ * pending/running 的 hop_card 补 hop_update {status:'aborted'} 终态 patch。
++ *
++ * 覆盖：
++ *   1. 启动 hydration（reconstructFromSnapshot）崩溃恢复 → hop 卡收口、
++ *      已 settle 的卡不改写、run 级 error 帧 + canceled；
++ *   2. sweep 幂等 —— 清扫补丁只发一条，finish 二次调用不再追加；
++ *   3. hydrateOne 懒恢复（O4 路径）同款收口。
++ *
++ * 纯 run-event-bus + timeline-replay，不碰 sqlite/cwd。
++ */
++import { describe, it, expect } from 'vitest';
++import {
++  createRunBus,
++  type RunEventRecord,
++  type RunPersistence,
++  type RunSnapshot,
++} from '../run-event-bus';
++import { replayTimeline } from '../timeline-replay';
++
++/** 一段「进程被 kill 时留下的」事件日志：hop 卡 h1 悬空、h2 已 settle。 */
++function crashLog(): RunEventRecord[] {
++  return [
++    {
++      id: 1,
++      event: 'message',
++      data: {
++        id: 'h1',
++        kind: 'hop_card',
++        turn_id: 'gwturn_x',
++        ts: 1_000,
++        from_agent: 'a1',
++        to_agent: 'a2',
++        from_name: '小张',
++        to_name: '小李',
++        status: 'pending',
++      },
++      ts: 1_000,
++    },
++    {
++      id: 2,
++      event: 'message-patch',
++      data: { id: 'h1', op: 'hop_update', patch: { status: 'running' } },
++      ts: 1_500,
++    },
++    {
++      id: 3,
++      event: 'message',
++      data: {
++        id: 'h2',
++        kind: 'hop_card',
++        turn_id: 'gwturn_x',
++        ts: 2_000,
++        from_agent: 'a2',
++        to_agent: 'a3',
++        from_name: '小李',
++        to_name: '小王',
++        status: 'pending',
++      },
++      ts: 2_000,
++    },
++    {
++      id: 4,
++      event: 'message-patch',
++      data: {
++        id: 'h2',
++        op: 'hop_update',
++        patch: { status: 'done', output_chars: 42, duration_ms: 800 },
++      },
++      ts: 2_800,
++    },
++  ];
++}
++
++function crashSnapshot(id: string): RunSnapshot {
++  return {
++    id,
++    status: 'running',
++    events: crashLog(),
++    nextEventId: 5,
++    exitCode: null,
++    signal: null,
++    createdAt: 1_000,
++    updatedAt: 2_800,
++  };
++}
++
++function makePersist(seed: RunSnapshot[]): RunPersistence & { saved: Map<string, RunSnapshot> } {
++  const saved = new Map<string, RunSnapshot>();
++  return {
++    saved,
++    save: (snap) => {
++      saved.set(snap.id, JSON.parse(JSON.stringify(snap)) as RunSnapshot);
++    },
++    remove: (id) => {
++      saved.delete(id);
++    },
++    loadAllSync: () => seed,
++    loadOneSync: (id) => saved.get(id) ?? seed.find((s) => s.id === id),
++  };
++}
++
++/** 统计某卡收到的 hop_update 补丁（按终态 status 过滤可选）。 */
++function hopPatches(events: RunEventRecord[], id: string, status?: string): RunEventRecord[] {
++  return events.filter((e) => {
++    if (e.event !== 'message-patch') return false;
++    const p = e.data as { id?: string; op?: string; patch?: { status?: string } };
++    return p.id === id && p.op === 'hop_update' && (status === undefined || p.patch?.status === status);
++  });
++}
++
++describe('sweepOpenProcessCards — hop 卡收口', () => {
++  it('启动 hydration：悬空 hop 卡补 aborted，已 settle 的不改写，run 落 canceled', () => {
++    const bus = createRunBus({ persist: makePersist([crashSnapshot('s1')]) });
++    const run = bus.get('s1')!;
++    expect(run.status).toBe('canceled');
++
++    const msgs = replayTimeline(run.events);
++    const h1 = msgs.find((m) => m.id === 'h1')!;
++    expect(h1).toMatchObject({ kind: 'hop_card', status: 'aborted' });
++    if (h1.kind === 'hop_card') {
++      expect(h1.detail).toBeTruthy();
++      expect(typeof h1.duration_ms === 'number').toBe(true);
++    }
++    // 已 settle 的 h2 保持生产者的 done/42/800。
++    expect(msgs.find((m) => m.id === 'h2')).toMatchObject({
++      kind: 'hop_card',
++      status: 'done',
++      output_chars: 42,
++      duration_ms: 800,
++    });
++    // 悬空卡只补一条 aborted 终态补丁；h2 零补丁。
++    expect(hopPatches(run.events, 'h1', 'aborted')).toHaveLength(1);
++    expect(hopPatches(run.events, 'h2')).toHaveLength(1);
++    // run 级中断错误帧在日志尾部。
++    const last = run.events[run.events.length - 1]!;
++    expect(last.event).toBe('error');
++    expect((last.data as { interrupted_by_restart?: boolean }).interrupted_by_restart).toBe(true);
++  });
++
++  it('幂等：清扫补丁不重复，二次 finish（异状态）不追加事件', () => {
++    const bus = createRunBus({ persist: makePersist([crashSnapshot('s2')]) });
++    const run = bus.get('s2')!;
++    const n = run.events.length;
++    // hydration 已把 run 落终态 —— finish 是 no-op，不应再扫出第二条补丁。
++    bus.finish('s2', 'failed');
++    bus.finish('s2', 'succeeded');
++    expect(run.events.length).toBe(n);
++    expect(run.status).toBe('canceled');
++    expect(hopPatches(run.events, 'h1', 'aborted')).toHaveLength(1);
++  });
++
++  it('hydrateOne 懒恢复（O4）：同款 hop 卡收口', () => {
++    const persist = makePersist([]);
++    persist.loadOneSync = (id) => (id === 's3' ? crashSnapshot('s3') : undefined);
++    const bus = createRunBus({ persist });
++    const run = bus.hydrateOne('s3')!;
++    expect(run.status).toBe('canceled');
++    const msgs = replayTimeline(run.events);
++    expect(msgs.find((m) => m.id === 'h1')).toMatchObject({ kind: 'hop_card', status: 'aborted' });
++    expect(msgs.find((m) => m.id === 'h2')).toMatchObject({ kind: 'hop_card', status: 'done' });
++    expect(hopPatches(run.events, 'h1', 'aborted')).toHaveLength(1);
++    // 懒恢复是只读语义：claimStart 不得重跑。
++    expect(bus.claimStart('s3')).toBe(false);
++  });
++});
+diff --git a/server/src/lib/__tests__/team-source.test.ts b/server/src/lib/__tests__/team-source.test.ts
+index 4b89f70..81190a7 100644
+--- a/server/src/lib/__tests__/team-source.test.ts
++++ b/server/src/lib/__tests__/team-source.test.ts
+@@ -66,6 +66,36 @@ describe('mapPythonTeamToRunShape', () => {
+     });
+     expect(r.edges).toEqual([]);
+   });
++
++  // 2026-11-05 历史教训回归防线：mapMode 曾把 mode:'approve' 折叠成
++  // 'sequential'，审批语义在读路径就丢了（chat 执行器无从知道该边要人工
++  // 审批）。此表钉死 mapMode 全量契约，防复发。
++  it.each([
++    ['approve', 'approve'],
++    ['parallel', 'parallel'],
++    ['conditional', 'conditional'],
++    ['direct', 'sequential'],
++    ['something-new', 'sequential'],
++  ] as const)('mapMode 契约:mode:%s → kind:%s（防折叠回归）', (mode, kind) => {
++    const r = mapPythonTeamToRunShape({
++      team_id: 't', agent_ids: ['a', 'b'],
++      workflow: {
++        nodes: [{ id: 'n1', data: { agentId: 'a' } }, { id: 'n2', data: { agentId: 'b' } }],
++        edges: [{ source: 'n1', target: 'n2', data: { mode } }],
++      },
++    });
++    expect(r.edges[0]).toEqual({ from: 'a', to: 'b', kind });
++  });
++  it('edge.data 缺 mode → sequential（缺省不丢审批语义前提:只有显式 approve 才是审批边）', () => {
++    const r = mapPythonTeamToRunShape({
++      team_id: 't', agent_ids: ['a', 'b'],
++      workflow: {
++        nodes: [{ id: 'n1', data: { agentId: 'a' } }, { id: 'n2', data: { agentId: 'b' } }],
++        edges: [{ source: 'n1', target: 'n2' }],
++      },
++    });
++    expect(r.edges[0]).toEqual({ from: 'a', to: 'b', kind: 'sequential' });
++  });
+ });
+ 
+ describe('loadTeamForRun', () => {
+diff --git a/server/src/lib/chat-dag/__tests__/hop-broadcast.test.ts b/server/src/lib/chat-dag/__tests__/hop-broadcast.test.ts
+new file mode 100644
+index 0000000..a0c1ae3
+--- /dev/null
++++ b/server/src/lib/chat-dag/__tests__/hop-broadcast.test.ts
+@@ -0,0 +1,251 @@
++/**
++ * hop-broadcast.test.ts — hop 生命周期实时播报收口测试（2026-11-07）。
++ *
++ * 覆盖 createHopBroadcaster（从 groups-chat 内联包装器抽出）：
++ *   - start → hop_update {status:'running'}「交接中」中间态上屏（修 pending→终态跳变）
++ *   - 帧先于补丁：名字解析期间到达的 patch 入队，hop_card 帧发出后按序 flush
++ *   - 按 hopId 索引：conditional rework 同边多 hop 各自成卡、patch 不串卡
++ *   - best-effort：emit 抛错不冒泡，base（SQLite 落库）照常调用
++ */
++
++import { describe, it, expect, vi } from 'vitest';
++import { createHopBroadcaster, type HopBroadcasterDeps } from '../hop-broadcast';
++import type { HopRecorder } from '../run-team-dag';
++import type { MessagePatch, TimelineMessage } from '../../contracts';
++
++/** 内存 base 记录器 — 形状对齐生产 storage/agent-hops.ts 的 open/start/settle。 */
++function mkBase(): HopRecorder & { calls: string[]; rows: Map<string, { from: string; to: string; status: string }> } {
++  const calls: string[] = [];
++  const rows = new Map<string, { from: string; to: string; status: string }>();
++  let n = 0;
++  return {
++    calls,
++    rows,
++    open: (edge) => {
++      const id = `hop-${++n}`;
++      calls.push(`open:${id}`);
++      rows.set(id, { from: edge.from, to: edge.to, status: 'pending' });
++      return id;
++    },
++    start: (id) => {
++      calls.push(`start:${id}`);
++      const r = rows.get(id);
++      if (r) r.status = 'running';
++    },
++    settle: (id, status) => {
++      calls.push(`settle:${id}:${status}`);
++      const r = rows.get(id);
++      if (r && !['done', 'failed', 'timeout', 'empty', 'denied', 'aborted'].includes(r.status)) r.status = status;
++    },
++  };
++}
++
++type Emitted =
++  | { type: 'msg'; msg: TimelineMessage }
++  | { type: 'patch'; patch: MessagePatch };
++
++function mkDeps(over: Partial<HopBroadcasterDeps> = {}) {
++  const emitted: Emitted[] = [];
++  let n = 0;
++  const deps: HopBroadcasterDeps & { emitted: Emitted[] } = {
++    emitted,
++    nextId: () => `card-${++n}`,
++    turnId: 'turn-1',
++    emitMessage: (msg) => emitted.push({ type: 'msg', msg }),
++    emitPatch: (patch) => emitted.push({ type: 'patch', patch }),
++    resolveName: async (id) => id.toUpperCase(),
++    ...over,
++  };
++  return deps;
++}
++
++/** 可手动 resolve 的名字解析器（模拟 pyGet 慢返回，制造 patch 先到场景）。 */
++function deferredNames() {
++  const pending: Array<() => void> = [];
++  return {
++    resolveName: (id: string) =>
++      new Promise<string>((res) => {
++        pending.push(() => res(id.toUpperCase()));
++      }),
++    flush: () => {
++      while (pending.length) pending.shift()!();
++    },
++  };
++}
++
++/** 宏任务 tick — 排空名字解析链上的全部微任务（单次 Promise.resolve 不够）。 */
++const tick = () => new Promise<void>((r) => setTimeout(r, 0));
++
++/** 取单条播报事件的 hop_update 信封（id/op/patch 收窄到 hop_update 变体）。 */
++function hopEnvelope(e: Emitted): Extract<MessagePatch, { op: 'hop_update' }> {
++  return (e as Extract<Emitted, { type: 'patch' }>).patch as Extract<MessagePatch, { op: 'hop_update' }>;
++}
++
++/** 取 hop_update patch 的 status 序列（忽略其他事件）。 */
++function patchStatuses(emitted: Emitted[]): string[] {
++  return emitted.filter((e) => e.type === 'patch').map((e) => hopEnvelope(e).patch.status as string);
++}
++
++describe('createHopBroadcaster — hop 生命周期播报', () => {
++  it('open 发 pending 全量帧，start→running「交接中」中间态，settle→终态', async () => {
++    const base = mkBase();
++    const deps = mkDeps();
++    const hops = createHopBroadcaster(base, deps);
++
++    const id = hops.open({ from: 'pm', to: 'dev' });
++    hops.start(id);
++    hops.settle(id, 'done', { outputChars: 42, detail: '' });
++    await tick();
++
++    expect(base.calls).toEqual([`open:${id}`, `start:${id}`, `settle:${id}:done`]);
++    // 帧：pending 全量（名字快照）
++    const msg = deps.emitted.find((e) => e.type === 'msg')!.msg as Extract<TimelineMessage, { kind: 'hop_card' }>;
++    expect(msg).toMatchObject({
++      kind: 'hop_card',
++      from_agent: 'pm',
++      to_agent: 'dev',
++      from_name: 'PM',
++      to_name: 'DEV',
++      status: 'pending',
++      turn_id: 'turn-1',
++    });
++    // 补丁序列：running（交接中）→ done（终态），中间态不再缺席
++    expect(patchStatuses(deps.emitted)).toEqual(['running', 'done']);
++    const done = hopEnvelope(deps.emitted[deps.emitted.length - 1]);
++    expect(done.patch).toMatchObject({ status: 'done', output_chars: 42 });
++    expect(typeof done.patch.duration_ms).toBe('number');
++    expect(done.patch.duration_ms!).toBeGreaterThanOrEqual(0);
++  });
++
++  it('帧未发（名字解析中）先 settle → patch 入队，帧先出、patch 后出', async () => {
++    const base = mkBase();
++    const names = deferredNames();
++    const deps = mkDeps({ resolveName: names.resolveName });
++    const hops = createHopBroadcaster(base, deps);
++
++    const id = hops.open({ from: 'a', to: 'b' });
++    hops.start(id);
++    hops.settle(id, 'failed', { detail: 'boom' });
++    // 名字还没回来：帧和 patch 都未发（patch 在队列里）
++    expect(deps.emitted).toHaveLength(0);
++
++    names.flush();
++    await tick();
++
++    // 顺序不变量：hop_card 帧必须先于任何 hop_update patch（前端 reducer / 回放依赖）
++    expect(deps.emitted.map((e) => e.type)).toEqual(['msg', 'patch', 'patch']);
++    expect(patchStatuses(deps.emitted)).toEqual(['running', 'failed']);
++    const failed = hopEnvelope(deps.emitted[2]);
++    expect(failed.patch).toMatchObject({ status: 'failed', detail: 'boom' });
++  });
++
++  it('同边多 hop（rework 每轮新开）→ 各自 cardId，patch 不串卡', async () => {
++    const base = mkBase();
++    const deps = mkDeps();
++    const hops = createHopBroadcaster(base, deps);
++
++    const round1 = hops.open({ from: 'qa', to: 'dev' });
++    hops.start(round1);
++    hops.settle(round1, 'failed', { detail: 'rework round 1' });
++    const round2 = hops.open({ from: 'qa', to: 'dev' });
++    hops.start(round2);
++    hops.settle(round2, 'done', { outputChars: 7 });
++    await tick();
++
++    const msgs = deps.emitted.filter((e) => e.type === 'msg').map((e) => (e.msg as { id: string }).id);
++    expect(new Set(msgs).size).toBe(2); // 两张独立卡
++    const patches = deps.emitted.filter((e) => e.type === 'patch') as Array<Extract<Emitted, { type: 'patch' }>>;
++    // round1 的终态打在 round1 卡上（旧按边 key 索引会串到 round2）
++    const byCard = new Map<string, string[]>();
++    for (const p of patches) {
++      const { id, patch } = hopEnvelope(p);
++      byCard.set(id, [...(byCard.get(id) ?? []), patch.status as string]);
++    }
++    expect(byCard.get(msgs[0])).toEqual(['running', 'failed']);
++    expect(byCard.get(msgs[1])).toEqual(['running', 'done']);
++  });
++
++  it('resolveName 拒绝 → 回落 agentId，帧照发、队列照 flush', async () => {
++    const base = mkBase();
++    const deps = mkDeps({ resolveName: async () => Promise.reject(new Error('py down')) });
++    const hops = createHopBroadcaster(base, deps);
++
++    const id = hops.open({ from: 'x', to: 'y' });
++    hops.settle(id, 'denied', { detail: 'policy deny' });
++    await tick();
++
++    const msg = deps.emitted.find((e) => e.type === 'msg')!.msg as Extract<TimelineMessage, { kind: 'hop_card' }>;
++    expect(msg.from_name).toBe('x');
++    expect(msg.to_name).toBe('y');
++    expect(patchStatuses(deps.emitted)).toEqual(['denied']);
++  });
++
++  it('emit 抛错不冒泡、base 落库照常（best-effort 不阻塞主链路）', () => {
++    const base = mkBase();
++    const deps = mkDeps({
++      emitMessage: () => {
++        throw new Error('sse gone');
++      },
++      emitPatch: () => {
++        throw new Error('sse gone');
++      },
++    });
++    const hops = createHopBroadcaster(base, deps);
++
++    expect(() => {
++      const id = hops.open({ from: 'a', to: 'b' });
++      hops.start(id);
++      hops.settle(id, 'aborted', { detail: '外部中止' });
++    }).not.toThrow();
++    // SQLite 侧（base）三次回调都落了
++    expect(base.calls).toHaveLength(3);
++    expect(base.rows.get(base.calls[0].slice('open:'.length))!.status).toBe('aborted');
++  });
++
++  it('未经 open 的 hopId → 播报静默降级、base 照常', () => {
++    const base = mkBase();
++    const deps = mkDeps();
++    const hops = createHopBroadcaster(base, deps);
++
++    expect(() => {
++      hops.start('stranger');
++      hops.settle('stranger', 'done', { outputChars: 1 });
++    }).not.toThrow();
++    expect(deps.emitted).toHaveLength(0);
++    expect(base.calls).toEqual(['start:stranger', 'settle:stranger:done']);
++  });
++
++  it('无 outputChars/detail 的终态 patch 不带缺席字段（不被 undefined 覆盖）', async () => {
++    const base = mkBase();
++    const deps = mkDeps();
++    const hops = createHopBroadcaster(base, deps);
++
++    const id = hops.open({ from: 'a', to: 'b' });
++    hops.start(id);
++    hops.settle(id, 'timeout');
++    await tick();
++
++    const last = hopEnvelope(deps.emitted[deps.emitted.length - 1]);
++    expect('output_chars' in last.patch).toBe(false);
++    expect('detail' in last.patch).toBe(false);
++    expect(typeof last.patch.duration_ms).toBe('number');
++  });
++
++  it('名字解析慢但不 reject：start 已在队列里等，帧发出后 running 补丁立即跟上', async () => {
++    const base = mkBase();
++    const names = deferredNames();
++    const deps = mkDeps({ resolveName: names.resolveName });
++    const hops = createHopBroadcaster(base, deps);
++
++    const id = hops.open({ from: 'a', to: 'b' });
++    hops.start(id);
++    names.flush();
++    await tick();
++    // 帧出来之后再 settle —— 直发不入队
++    hops.settle(id, 'done', { outputChars: 3 });
++    await tick();
++
++    expect(deps.emitted.map((e) => e.type)).toEqual(['msg', 'patch', 'patch']);
++    expect(patchStatuses(deps.emitted)).toEqual(['running', 'done']);
++  });
++});
+diff --git a/server/src/lib/chat-dag/hop-broadcast.ts b/server/src/lib/chat-dag/hop-broadcast.ts
+new file mode 100644
+index 0000000..2366600
+--- /dev/null
++++ b/server/src/lib/chat-dag/hop-broadcast.ts
+@@ -0,0 +1,129 @@
++/**
++ * hop-broadcast.ts — hop 生命周期实时播报（hop_card 帧 + hop_update patch），
++ * 2026-11-07 从 groups-chat.ts 内联包装器抽出（可直测的纯逻辑 + 注入 IO）。
++ *
++ * 为什么抽出（三个真实缺陷一起修）
++ * ---------------------------------
++ *   1. 「交接中」中间态不上屏：start 回调此前只落库不播报，聊天流 hop 卡
++ *      pending 直跳终态（P0 盘点「pending→终态跳变」）。现在 start → 发
++ *      hop_update {status:'running'}，NeoHopCard 显示「交接中」。
++ *   2. 帧/补丁顺序竞态：open 的帧要异步解析 agent 名字才发出，settle 的
++ *      patch 若先到会打在未知消息 id 上（前端 reducer 静默丢弃、回放同样
++ *      丢失）。现在按 hopId 缓存帧状态：帧未发先把 patch 入队，帧发出后
++ *      按序 flush —— hop_update 永远晚于其 hop_card 帧。
++ *   3. 按边 key 索引串卡：conditional rework 对同一条边每轮新开 hop，旧
++ *      包装器按 "from→to" 索引帧 id，后一轮 open 会覆盖前一轮，settle 打到
++ *      别的卡上。现在按 hopId 索引，每轮 rework 各自成卡。
++ *
++ * 契约边界（additive，不改 contracts.ts）
++ * ---------------------------------------
++ *   - 帧 = hop_card status:'pending'（open 时刻全量帧，名字快照）；
++ *   - patch = hop_update，status:'running'（交接中）或终态（settle）；
++ *   - 播报 best-effort：emit 抛错静默吞掉，绝不阻塞 SQLite 落库主链路
++ *     （base 的 open/start/settle 总是先调）。
++ */
++import type { MessagePatch, TimelineMessage } from '../contracts';
++import type { HopRecorder } from './run-team-dag';
++
++/** hop_update 的 patch 载荷（与 contracts.ts MessagePatch 同源收窄）。 */
++export type HopUpdatePatch = Extract<MessagePatch, { op: 'hop_update' }>['patch'];
++
++export interface HopBroadcasterDeps {
++  /** 帧 id 生成（生产 = GatewayRun.nextId）。 */
++  nextId: () => string;
++  /** 回合 id，写进帧 turn_id。 */
++  turnId: string;
++  emitMessage: (msg: TimelineMessage) => void;
++  emitPatch: (patch: MessagePatch) => void;
++  /** agent 展示名解析（open 时刻快照进帧；拒绝回落 agentId）。 */
++  resolveName: (agentId: string) => Promise<string>;
++}
++
++interface FrameState {
++  cardId: string;
++  openedAt: number;
++  ready: boolean;
++  queue: HopUpdatePatch[];
++}
++
++/**
++ * 包一层 HopRecorder：SQLite 落库（base）照旧，播报按下列不变量收口：
++ *   - 每个 hopId 一张卡；patch 只打自己的卡；
++ *   - 先帧后补丁（帧未发 patch 入队，帧发出后按序 flush）；
++ *   - open/start/settle 的 base 调用先于一切播报，且播报异常不冒泡。
++ */
++export function createHopBroadcaster(base: HopRecorder, deps: HopBroadcasterDeps): HopRecorder {
++  const frames = new Map<string, FrameState>();
++
++  const emitSafe = (fn: () => void): void => {
++    try {
++      fn();
++    } catch {
++      /* best-effort — 播报失败不影响落库主链路 */
++    }
++  };
++
++  const pushPatch = (hopId: string, patch: HopUpdatePatch): void => {
++    const st = frames.get(hopId);
++    if (!st) return; // 非本广播器 open 的 hop（理论上不存在）→ 静默降级
++    if (st.ready) {
++      emitSafe(() => deps.emitPatch({ id: st.cardId, op: 'hop_update', patch }));
++    } else {
++      st.queue.push(patch);
++    }
++  };
++
++  return {
++    open: (edge) => {
++      const hopId = base.open(edge);
++      const st: FrameState = {
++        cardId: deps.nextId(),
++        openedAt: Date.now(),
++        ready: false,
++        queue: [],
++      };
++      frames.set(hopId, st);
++      // 名字解析异步；期间到达的 patch 入队，帧发出后按序 flush。
++      void (async () => {
++        const [fromName, toName] = await Promise.all([
++          deps.resolveName(edge.from).catch(() => edge.from),
++          deps.resolveName(edge.to).catch(() => edge.to),
++        ]);
++        if (frames.get(hopId) !== st) return; // 防御：状态被替换则不再发帧
++        emitSafe(() =>
++          deps.emitMessage({
++            id: st.cardId,
++            kind: 'hop_card',
++            turn_id: deps.turnId,
++            ts: Date.now(),
++            from_agent: edge.from,
++            to_agent: edge.to,
++            from_name: fromName,
++            to_name: toName,
++            status: 'pending',
++          }),
++        );
++        st.ready = true;
++        for (const queued of st.queue.splice(0)) {
++          emitSafe(() => deps.emitPatch({ id: st.cardId, op: 'hop_update', patch: queued }));
++        }
++      })();
++      return hopId;
++    },
++    start: (id) => {
++      base.start(id);
++      // 「交接中」中间态 — 上游开始产出交接内容（此前 pending 直跳终态）。
++      pushPatch(id, { status: 'running' });
++    },
++    settle: (id, status, opts) => {
++      base.settle(id, status, opts);
++      const st = frames.get(id);
++      pushPatch(id, {
++        status,
++        ...(opts?.outputChars !== undefined ? { output_chars: opts.outputChars } : {}),
++        ...(opts?.detail ? { detail: opts.detail } : {}),
++        ...(st ? { duration_ms: Date.now() - st.openedAt } : {}),
++      });
++    },
++  };
++}
+diff --git a/server/src/lib/run-event-bus.ts b/server/src/lib/run-event-bus.ts
+index 633f8ff..8796dcc 100644
+--- a/server/src/lib/run-event-bus.ts
++++ b/server/src/lib/run-event-bus.ts
+@@ -78,6 +78,19 @@ const TERMINAL: ReadonlySet<RunStatus> = new Set<RunStatus>([
+   'canceled',
+ ]);
+ 
++/**
++ * hop 卡终态集合 — contracts.ts hop_update patch.status 里除 'running' 外皆终态
++ * （done/failed/timeout/empty/denied/aborted）。清扫用它判「已有结算、勿再补」。
++ */
++const HOP_TERMINAL: ReadonlySet<string> = new Set([
++  'done',
++  'failed',
++  'timeout',
++  'empty',
++  'denied',
++  'aborted',
++]);
++
+ /** A connected SSE view. The route layer implements these against `res`. */
+ export interface RunEventSink {
+   /** Write one event frame. Called for replayed AND live events. */
+@@ -240,20 +253,23 @@ export function createRunBus(opts: RunBusOptions = {}): RunBus {
+    * 只认 message/message-patch 事件，这些卡就永远停在 streaming（前端转圈
+    * 23 小时的根因）。这里扫一遍日志，给每张未终态卡就地补一条终态 patch
+    * （'message-patch' 事件追加到日志尾部），使任何回放路径都干净落定。
+-   * 幂等：已终态的卡直接跳过。
++   * 2026-11-07 hop 卡收口 — hop_card 帧（pending/running）同样在此补
++   * hop_update {status:'aborted'} 终态：SQLite 侧有 sweepOrphanHops 兜底，
++   * 但重放可见的时间线侧此前无人收口，崩溃/中断后 hop 卡永卡「交接中」。
++   * 幂等：已终态的卡直接跳过（含本清扫补过的 —— 合成 patch 也在日志里）。
+    */
+   const sweepOpenProcessCards = (run: Run): number => {
+     // 按消息 id 归并已见过的终态信号（append/中间帧不算）——后写的终态优先。
+     const finalized = new Set<string>();
+     for (const rec of run.events) {
+       if (rec.event !== 'message-patch') continue;
+-      const p = rec.data as { id?: string; op?: string } | null;
++      const p = rec.data as { id?: string; op?: string; patch?: { status?: string } } | null;
+       if (!p || typeof p.id !== 'string') continue;
+       if (
+         p.op === 'thinking_finalize' ||
+         p.op === 'tool_finalize' ||
+-        (p.op === 'msg_foot_update' &&
+-          (p as { patch?: { status?: string } }).patch?.status === 'done')
++        (p.op === 'msg_foot_update' && p.patch?.status === 'done') ||
++        (p.op === 'hop_update' && HOP_TERMINAL.has(p.patch?.status ?? ''))
+       ) {
+         finalized.add(p.id);
+       }
+@@ -303,6 +319,27 @@ export function createRunBus(opts: RunBusOptions = {}): RunBus {
+         });
+         finalized.add(m.id);
+         swept += 1;
++      } else if (m.kind === 'hop_card' && (m.status === 'pending' || m.status === 'running')) {
++        // hop 卡收口 — 中断/崩溃时 hop 的 settle 从未发生（SQLite 侧由
++        // sweepOrphanHops 补 aborted），日志侧在此对齐：补 aborted 终态
++        // patch，回放不再永卡「交接中」。已 settle 的卡在上面 finalized
++        // 已收集（终态 hop_update），不会被改写。
++        run.events.push({
++          id: run.nextEventId++,
++          event: 'message-patch',
++          data: {
++            id: m.id,
++            op: 'hop_update',
++            patch: {
++              status: 'aborted',
++              detail: '回合中断，交接未结算',
++              duration_ms: Math.max(0, now() - (m.ts ?? now())),
++            },
++          },
++          ts: now(),
++        });
++        finalized.add(m.id);
++        swept += 1;
+       }
+     }
+     return swept;
+diff --git a/server/src/routes/__tests__/groups-chat-approval-endpoint.test.ts b/server/src/routes/__tests__/groups-chat-approval-endpoint.test.ts
+index 4356978..6feef37 100644
+--- a/server/src/routes/__tests__/groups-chat-approval-endpoint.test.ts
++++ b/server/src/routes/__tests__/groups-chat-approval-endpoint.test.ts
+@@ -1,58 +1,230 @@
+ /**
+- * groups-chat-approval-endpoint.test.ts — 审批决定端点 + 文本决定解析测试。
++ * groups-chat-approval-endpoint.test.ts — 审批决定三条路径回归测试。
+  *
+- * 覆盖 2026-11-05 approve 边人工审批门的群聊接线层：
+- *   - POST /:id/approvals/:nodeId 显式决定：approve / reject / 400 / 409
+- *   - tryResolveApprovalFromText：批准/拒绝关键词命中 → resolve 全部挂起；
+- *     非决定文本不消费 pending
++ * 覆盖 2026-11-05 approve 边人工审批门的群聊接线层（2026-11-07 补全）：
++ *   - parseApprovalDecision：会话短文本决定解析——批准词/拒绝词、长度闸门
++ *     防误吞派活（「继续写代码」不吞）、「继续」因歧义不在词表
++ *   - tryResolveApprovalFromText：组内全部挂起同决、跨组隔离、非决定文本不消费
++ *   - approvalDecisionHandler（POST /:id/approvals/:nodeId）：400 BAD_DECISION /
++ *     409 NO_PENDING / 200 approve / 200 reject，决定后二次调用 409（幂等）
++ *   - swapDagRun 换轮拒收场：上一轮挂起审批视作拒绝，不悬挂；他组不受影响
++ *   - registerPendingApproval 30 分钟兜底超时 → 自动拒绝（fake timers）
+  *
+- * 不起真 Express：router.route 配合 supertest 不引新依赖 — 直接手工构造
+- * req/res mock 打 handler（与既有 groups-chat 测试同款轻量风格）。
++ * 不起真 Express：handler 为导出函数，手工构造 req/res mock 直打。
++ * 此前本文件用「同正则副本」复测文本解析——双实现会漂移，现直打真实现。
+  */
+-import { describe, it, expect, beforeEach } from 'vitest';
++import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+ 
+ import {
++  approvalDecisionHandler,
+   clearPendingApprovals,
++  parseApprovalDecision,
++  registerPendingApproval,
++  swapDagRun,
++  tryResolveApprovalFromText,
+ } from '../groups-chat';
+ 
+-// pendingApprovals 是模块私有 — 通过导出的 clearPendingApprovals 清理 +
+-// 文本路径经 tryResolveApprovalFromText 不可直接 import（未导出）。这里把
+-// 文本解析的语义等价物（同一正则）在本文件内复测，真实接线由执行器单测覆盖。
+-
+-function approvalResolverRegex(text: string): 'approve' | 'reject' | null {
+-  const trimmed = text.trim().toLowerCase();
+-  // 决定消息必须短——「继续写代码」是派活不是决定（长度闸门）。
+-  // 中文 ≤6 字；含拉丁字符 ≤10（"approve" 全词 7 字符）。
+-  const latinChars = (trimmed.match(/[a-z]/g) ?? []).length;
+-  const lenLimit = latinChars > 0 ? 10 : 6;
+-  if (trimmed.length > lenLimit) return null;
+-  const isApprove = /^(批准|同意|approve|ok|好|通过|allowed|yes)/.test(trimmed);
+-  const isReject = /^(拒绝|不同意|reject|否|不行|停|驳回|no|deny)/.test(trimmed);
+-  if (isApprove) return 'approve';
+-  if (isReject) return 'reject';
+-  return null;
++function settledFlag(p: Promise<unknown>): { done: boolean } {
++  const flag = { done: false };
++  void p.then(() => { flag.done = true; });
++  return flag;
+ }
+ 
+-describe('审批文本决定解析（与 tryResolveApprovalFromText 同语义）', () => {
+-  it.each(['批准', '同意，继续吧', 'approve', 'OK', '通过', 'yes'])('「%s」→ approve', (t) => {
+-    expect(approvalResolverRegex(t)).toBe('approve');
++beforeEach(() => {
++  clearPendingApprovals();
++});
++
++describe('parseApprovalDecision（真实实现）', () => {
++  it.each(['批准', '同意', '同意，继续吧', 'approve', 'APPROVE', 'OK', '好', '通过', 'yes'])(
++    '「%s」→ approved', (t) => {
++      expect(parseApprovalDecision(t)).toBe('approved');
++    });
++  it.each(['拒绝', '不同意', 'reject', '否', '不行，重做', '停', '驳回', 'no', 'deny'])(
++    '「%s」→ rejected', (t) => {
++      expect(parseApprovalDecision(t)).toBe('rejected');
++    });
++  it.each([
++    '继续', // 历史决策：歧义词移出批准词表（2026-11-05）
++    '继续写代码',
++    '帮我看看这个',
++    '把文档改一下',
++    '继续往下推进这个任务',
++    '批准这个方案然后开始执行', // 以「批准」开头但超长 —— 是派活不是决定
++    'approve now', // 11 字符 > 拉丁闸门 10
++    'please approve this',
++  ])('非决定/超长文本「%s」→ null（长度闸门防误吞派活）', (t) => {
++    expect(parseApprovalDecision(t)).toBeNull();
++  });
++  it('大小写与首尾空白不敏感', () => {
++    expect(parseApprovalDecision('  Approve  ')).toBe('approved');
++    expect(parseApprovalDecision('NO')).toBe('rejected');
++  });
++});
++
++describe('tryResolveApprovalFromText（组内消费语义）', () => {
++  it('组内全部挂起同决 — 一条短文本 resolve 该组全部 pending', async () => {
++    const a = registerPendingApproval('g1', 'n1');
++    const b = registerPendingApproval('g1', 'n2');
++    expect(tryResolveApprovalFromText('g1', '批准')).toBe(true);
++    await expect(a).resolves.toBe('approved');
++    await expect(b).resolves.toBe('approved');
++    // 已消费 — 再来一条不重复消费
++    expect(tryResolveApprovalFromText('g1', '批准')).toBe(false);
++  });
++
++  it('跨组隔离 — g2 的决定文本不消费 g1 的挂起', async () => {
++    const a = registerPendingApproval('g1', 'n1');
++    const f = settledFlag(a);
++    expect(tryResolveApprovalFromText('g2', '批准')).toBe(false);
++    await Promise.resolve();
++    expect(f.done).toBe(false);
++    // g1 的挂起仍可被本组文本正常消费
++    expect(tryResolveApprovalFromText('g1', '拒绝')).toBe(true);
++    await expect(a).resolves.toBe('rejected');
++  });
++
++  it('非决定文本不消费挂起（防误吞派活）', async () => {
++    const a = registerPendingApproval('g1', 'n1');
++    expect(tryResolveApprovalFromText('g1', '继续写代码')).toBe(false);
++    expect(tryResolveApprovalFromText('g1', '批准这个方案然后开始执行')).toBe(false);
++    const f = settledFlag(a);
++    await Promise.resolve();
++    expect(f.done).toBe(false);
++    expect(tryResolveApprovalFromText('g1', '同意')).toBe(true);
++    await expect(a).resolves.toBe('approved');
++  });
++
++  it('无挂起时任何文本都返回 false，不抛异常', () => {
++    expect(tryResolveApprovalFromText('g0', '批准')).toBe(false);
++    expect(tryResolveApprovalFromText('g0', '乱说一通')).toBe(false);
++  });
++});
++
++describe('approvalDecisionHandler（POST /:id/approvals/:nodeId）', () => {
++  function mkRes() {
++    const out: { status?: number; body?: unknown } = {};
++    const res = {
++      status(code: number) { out.status = code; return res; },
++      json(body: unknown) { out.body = body; return res; },
++    };
++    return { res, out };
++  }
++  const mkReq = (body?: unknown) => ({ params: { id: 'g1', nodeId: 'n1' }, body });
++
++  it('非法 decision → 400 BAD_DECISION（缺 body / 未知值都拒）', () => {
++    for (const body of [undefined, {}, { decision: 'maybe' }, { decision: 1 }]) {
++      const { res, out } = mkRes();
++      approvalDecisionHandler(mkReq(body), res);
++      expect(out.status).toBe(400);
++      expect((out.body as { error: { code: string } }).error.code).toBe('BAD_DECISION');
++    }
+   });
+-  it.each(['拒绝', '不同意', 'reject', '否', '不行，重做', '停'])('「%s」→ reject', (t) => {
+-    expect(approvalResolverRegex(t)).toBe('reject');
++
++  it('无挂起 → 409 NO_PENDING_APPROVAL', () => {
++    const { res, out } = mkRes();
++    approvalDecisionHandler(mkReq({ decision: 'approve' }), res);
++    expect(out.status).toBe(409);
++    expect((out.body as { error: { code: string } }).error.code).toBe('NO_PENDING_APPROVAL');
++  });
++
++  it('approve → 200，promise 收 approved，挂起被清（二次调用 409 幂等）', async () => {
++    const p = registerPendingApproval('g1', 'n1');
++    const { res, out } = mkRes();
++    approvalDecisionHandler(mkReq({ decision: 'approve' }), res);
++    expect(out.status).toBeUndefined();
++    expect(out.body).toEqual({ group_id: 'g1', node_id: 'n1', decision: 'approve' });
++    await expect(p).resolves.toBe('approved');
++    const { res: res2, out: out2 } = mkRes();
++    approvalDecisionHandler(mkReq({ decision: 'approve' }), res2);
++    expect(out2.status).toBe(409);
++  });
++
++  it('reject → 200，promise 收 rejected', async () => {
++    const p = registerPendingApproval('g1', 'n1');
++    const { res, out } = mkRes();
++    approvalDecisionHandler(mkReq({ decision: 'reject' }), res);
++    expect(out.status).toBeUndefined();
++    await expect(p).resolves.toBe('rejected');
++  });
++
++  it('nodeId 精确匹配 — n1 的决定不误清 n2 的挂起', async () => {
++    const p2 = registerPendingApproval('g1', 'n2');
++    const { res, out } = mkRes();
++    approvalDecisionHandler(mkReq({ decision: 'approve' }), res); // 只找 n1（无挂起，409）
++    expect(out.status).toBe(409);
++    const f = settledFlag(p2);
++    await Promise.resolve();
++    expect(f.done).toBe(false);
++    expect(tryResolveApprovalFromText('g1', '批准')).toBe(true);
++    await expect(p2).resolves.toBe('approved');
++  });
++});
++
++describe('swapDagRun 换轮拒收场（决定路径③）', () => {
++  it('换轮即把上一轮挂起审批视作拒绝，promise 不悬挂', async () => {
++    const a = registerPendingApproval('g1', 'n1');
++    const b = registerPendingApproval('g1', 'n2');
++    const ac = swapDagRun('g1', new Map());
++    expect(ac.signal.aborted).toBe(false);
++    await expect(a).resolves.toBe('rejected');
++    await expect(b).resolves.toBe('rejected');
++    // 拒收场后无残留挂起
++    expect(tryResolveApprovalFromText('g1', '批准')).toBe(false);
++  });
++
++  it('他组挂起不受换轮影响，仍可正常决定', async () => {
++    const mine = registerPendingApproval('g1', 'n1');
++    const other = registerPendingApproval('g2', 'n1');
++    swapDagRun('g1', new Map());
++    await expect(mine).resolves.toBe('rejected');
++    const f = settledFlag(other);
++    await Promise.resolve();
++    expect(f.done).toBe(false);
++    expect(tryResolveApprovalFromText('g2', '批准')).toBe(true);
++    await expect(other).resolves.toBe('approved');
+   });
+-  it.each(['帮我看看这个', '把文档改一下', '继续写代码', '继续往下推进这个任务'])('非决定文本「%s」→ null', (t) => {
+-    expect(approvalResolverRegex(t)).toBeNull();
++
++  it('换轮 abort 上一轮 controller 的既有行为保持（回归）', () => {
++    const reg = new Map<string, AbortController>();
++    const first = swapDagRun('g1', reg);
++    const second = swapDagRun('g1', reg);
++    expect(first.signal.aborted).toBe(true);
++    expect(second.signal.aborted).toBe(false);
++    expect(reg.get('g1')).toBe(second);
+   });
+ });
+ 
+-describe('clearPendingApprovals（测试可见性导出）', () => {
+-  beforeEach(() => {
+-    clearPendingApprovals();
++describe('registerPendingApproval 30 分钟兜底超时', () => {
++  afterEach(() => {
++    vi.useRealTimers();
++  });
++
++  it('超时未决定 → 自动 rejected 收场，挂起被清', async () => {
++    vi.useFakeTimers();
++    const p = registerPendingApproval('g1', 'n1');
++    const f = settledFlag(p);
++    await Promise.resolve();
++    expect(f.done).toBe(false); // 未超时前仍悬挂
++    vi.advanceTimersByTime(30 * 60_000);
++    await expect(p).resolves.toBe('rejected');
++    // 超时清挂起 — 文本/端点路径均视为无挂起
++    expect(tryResolveApprovalFromText('g1', '批准')).toBe(false);
++    const out2: { status?: number } = {};
++    approvalDecisionHandler(
++      { params: { id: 'g1', nodeId: 'n1' }, body: { decision: 'approve' } },
++      { status(code: number) { out2.status = code; return { json: () => {} }; }, json: () => {} },
++    );
++    expect(out2.status).toBe(409);
+   });
+-  it('导出存在且可重复调用（幂等）', () => {
+-    expect(() => {
+-      clearPendingApprovals();
+-      clearPendingApprovals();
+-    }).not.toThrow();
++
++  it('30 分钟内已决定 → 超时不再二次收场（幂等）', async () => {
++    vi.useFakeTimers();
++    const p = registerPendingApproval('g1', 'n1');
++    expect(tryResolveApprovalFromText('g1', '批准')).toBe(true);
++    await expect(p).resolves.toBe('approved');
++    vi.advanceTimersByTime(30 * 60_000); // 不抛、不影响后续挂起
++    const p2 = registerPendingApproval('g1', 'n2');
++    expect(tryResolveApprovalFromText('g1', '拒绝')).toBe(true);
++    await expect(p2).resolves.toBe('rejected');
+   });
+ });
+diff --git a/server/src/routes/groups-chat.ts b/server/src/routes/groups-chat.ts
+index ed5e064..01a6306 100644
+--- a/server/src/routes/groups-chat.ts
++++ b/server/src/routes/groups-chat.ts
+@@ -45,7 +45,6 @@ import { parseMentions, restrictTeamToMentions, type MentionCandidate } from '..
+ // 2026-11-05 交接记录 — OpenBot hop/work_items 设计移植：DAG 边 A→B 全生命周期
+ // 落库 + 回合结束紧凑交接摘要（零 LLM）+ GET /:id/hops 查询。
+ import {
+-  listHopsByTurn,
+   listRecentHops,
+   nextTurnSeq,
+   openHop,
+@@ -53,6 +52,8 @@ import {
+   startHop,
+   summarizeHops,
+ } from '../storage/agent-hops';
++// 2026-11-07 — hop 播报收口（running「交接中」中间态 + 帧先于补丁 + 按 hopId 索引）。
++import { createHopBroadcaster } from '../lib/chat-dag/hop-broadcast';
+ // Polynoia 对标（2026-08-15）— INTENT_PARSE 编排拆解 + worktree 隔离闭环 + git 证据。
+ import { decomposeWithLlm, type ParsedTask } from '../lib/orchestrator-parse';
+ // 对话框知识库（2026-11-06）— 记忆库检索块（fail-soft），DAG/串行派发共用。
+@@ -111,21 +112,30 @@ export function clearPendingApprovals(): void {
+   pendingApprovals.clear();
+ }
+ 
+-/** 处理该群下一条用户消息里可能隐含的审批决定。返回是否消费了一条 pending。 */
+-function tryResolveApprovalFromText(groupId: string, text: string): boolean {
++/**
++ * 纯函数：解析会话短文本里的审批决定（OpenBot 审批纪律决定路径②）。
++ * 导出供回归测试直打真实实现——此前测试用同正则副本复测，双实现会漂移。
++ */
++export function parseApprovalDecision(text: string): 'approved' | 'rejected' | null {
+   const trimmed = text.trim().toLowerCase();
+-  const entries = [...pendingApprovals.entries()].filter(([k]) => k.startsWith(`${groupId}:`));
+-  if (entries.length === 0) return false;
+   // 决定消息必须短——「批准」「拒绝」是决定，「继续写代码」这种长句是新一轮
+   // 派活，不吞（前缀「继续」会误伤，长度闸门兜住）。中文 ≤6 字；拉丁词按
+   // 字符计 ≤10（"approve"/"rejected" 全词各 7-8 字符）。
+   const latinChars = (trimmed.match(/[a-z]/g) ?? []).length;
+   const lenLimit = latinChars > 0 ? 10 : 6;
+-  if (trimmed.length > lenLimit) return false;
++  if (trimmed.length > lenLimit) return null;
+   const isApprove = /^(批准|同意|approve|ok|好|通过|allowed|yes)/.test(trimmed);
+   const isReject = /^(拒绝|不同意|reject|否|不行|停|驳回|no|deny)/.test(trimmed);
+-  if (!isApprove && !isReject) return false;
+-  const verdict: 'approved' | 'rejected' = isApprove ? 'approved' : 'rejected';
++  if (!isApprove && !isReject) return null;
++  return isApprove ? 'approved' : 'rejected';
++}
++
++/** 处理该群下一条用户消息里可能隐含的审批决定。返回是否消费了一条 pending。 */
++export function tryResolveApprovalFromText(groupId: string, text: string): boolean {
++  const entries = [...pendingApprovals.entries()].filter(([k]) => k.startsWith(`${groupId}:`));
++  if (entries.length === 0) return false;
++  const verdict = parseApprovalDecision(text);
++  if (!verdict) return false;
+   for (const [key, resolve] of entries) {
+     pendingApprovals.delete(key);
+     try {
+@@ -200,6 +210,24 @@ export function sinkRoundHandoff(input: {
+   });
+ }
+ 
++/**
++ * 注册一次节点审批挂起，返回等决定的 Promise（决定路径①②③的单一注册真源）。
++ * deps.approval.request 接线与回归测试共用。外部取消（用户插话换轮/停止生成）
++ * 由 swapDagRun 拒收场；这里另挂 30 分钟兜底超时（与 run 超时同量级，避免永久
++ * pending 占内存）——超时视作拒绝，审批 promise 永不悬挂。
++ */
++export function registerPendingApproval(groupId: string, nodeId: string): Promise<'approved' | 'rejected'> {
++  return new Promise<'approved' | 'rejected'>((resolve) => {
++    const key = `${groupId}:${nodeId}`;
++    pendingApprovals.set(key, resolve);
++    setTimeout(() => {
++      if (pendingApprovals.delete(key)) {
++        try { resolve('rejected'); } catch { /* settled */ }
++      }
++    }, 30 * 60_000).unref?.();
++  });
++}
++
+ // 测试可见:登记本轮 controller 并取消同 group 上一轮,返回本轮 controller。
+ export function swapDagRun(groupId: string, registry: Map<string, AbortController>): AbortController {
+   registry.get(groupId)?.abort();
+@@ -974,15 +1002,15 @@ async function runFanout(
+         }
+ 
+         // ── 交接记录（2026-11-05，OpenBot hop 模型）───────────────────────
+-        // 本回合一个 turn_seq；SQLite 落库失败时降级为内存 Map（聊天主链路零影响）。
++        // 本回合一个 turn_seq；SQLite 落库失败时降级为无记录路径（聊天主链路零影响）。
+         let turnSeq = 0;
+         let hopStore: HopRecorder | null = null;
+         // 2026-11-05 Task#10 — hop 生命周期实时播报（hop_card 帧 + hop_update patch）：
+         // SQLite 侧照旧落库，播报属 best-effort（gw 为 null / emit 抛错都不影响主链路）。
+-        // roster 名解析：hopIdFor 只拿 agentId，这里维护 id→name 快照表。
++        // 2026-11-07 播报收口进 chat-dag/hop-broadcast.ts（可直测）：start→running
++        // 「交接中」中间态上屏、帧先于补丁（名字解析期间 patch 入队按序 flush）、
++        // 按 hopId 索引防 conditional rework 同边多 hop 串卡。
+         const agentNameById = new Map<string, string>();
+-        const hopCardIdByEdge = new Map<string, string>(); // "from→to" → hop_card 帧id
+-        const hopOpenedAtByEdge = new Map<string, number>();
+         const resolveAgentName = async (agentId: string): Promise<string> => {
+           const hit = agentNameById.get(agentId);
+           if (hit) return hit;
+@@ -991,12 +1019,6 @@ async function runFanout(
+           agentNameById.set(agentId, name);
+           return name;
+         };
+-        /** 把 SQLite hopStore 的三次回调包上播报；emit 失败静默（best-effort）。 */
+-        const emitHopFrame = (fn: () => void): void => {
+-          try {
+-            fn();
+-          } catch { /* best-effort */ }
+-        };
+         try {
+           turnSeq = nextTurnSeq(groupId);
+           const dbStore: HopRecorder = {
+@@ -1004,71 +1026,16 @@ async function runFanout(
+             start: (id) => { try { startHop(id); } catch { /* best-effort */ } },
+             settle: (id, status, opts) => { try { settleHop(id, status, opts); } catch { /* best-effort */ } },
+           };
+-          if (gw) {
+-            hopStore = {
+-              open: (edge) => {
+-                const hopId = dbStore.open(edge);
+-                // 播报帧异步准备（open 回调本身要求同步返回 hopId，不能 await）。
+-                void (async () => {
+-                  const [fromName, toName] = await Promise.all([resolveAgentName(edge.from), resolveAgentName(edge.to)]);
+-                  const cardId = gw.nextId();
+-                  const key = `${edge.from}→${edge.to}`;
+-                  hopCardIdByEdge.set(key, cardId);
+-                  hopOpenedAtByEdge.set(key, Date.now());
+-                  emitHopFrame(() =>
+-                    gw.emitMessage({
+-                      id: cardId,
+-                      kind: 'hop_card',
+-                      turn_id: gw.turnId,
+-                      ts: Date.now(),
+-                      from_agent: edge.from,
+-                      to_agent: edge.to,
+-                      from_name: fromName,
+-                      to_name: toName,
+-                      status: 'pending',
+-                    }),
+-                  );
+-                })();
+-                return hopId;
+-              },
+-              start: (id) => {
+-                dbStore.start(id);
+-                // start 回调只拿 hopId（不拿边），由 SQLite 行反查边 key —— 但为避免
+-                // 逐帧查库，这里用「settled 未知的帧保持 pending」策略：播报粒度到
+-                // settle 已足够（pending → 终态），start 不单独 patch。
+-              },
+-              settle: (id, status, opts) => {
+-                dbStore.settle(id, status, opts);
+-                // settle 同样只拿 hopId —— 边 key 反查走 SQLite 行（listHopsByTurn 本回合），
+-                // 但 settle 高频小查询代价可忽略；找不到对应帧则静默（降级安全）。
+-                void (async () => {
+-                  try {
+-                    const hops = listHopsByTurn(groupId, turnSeq);
+-                    const hop = hops.find((h) => h.id === id);
+-                    if (!hop) return;
+-                    const key = `${hop.from_agent}→${hop.to_agent}`;
+-                    const cardId = hopCardIdByEdge.get(key);
+-                    if (!cardId) return;
+-                    const openedAt = hopOpenedAtByEdge.get(key) ?? Date.now();
+-                    emitHopFrame(() =>
+-                      gw.emitPatch({
+-                        id: cardId,
+-                        op: 'hop_update',
+-                        patch: {
+-                          status,
+-                          ...(opts?.outputChars !== undefined ? { output_chars: opts.outputChars } : {}),
+-                          ...(opts?.detail ? { detail: opts.detail } : {}),
+-                          duration_ms: Date.now() - openedAt,
+-                        },
+-                      }),
+-                    );
+-                  } catch { /* best-effort */ }
+-                })();
+-              },
+-            };
+-          } else {
+-            hopStore = dbStore;
+-          }
++          const gwRun = gw;
++          hopStore = gwRun
++            ? createHopBroadcaster(dbStore, {
++                nextId: () => gwRun.nextId(),
++                turnId: gwRun.turnId,
++                emitMessage: (m) => gwRun.emitMessage(m),
++                emitPatch: (p) => gwRun.emitPatch(p),
++                resolveName: resolveAgentName,
++              })
++            : dbStore;
+         } catch { hopStore = null; }
+ 
+         // 记忆交接沉淀（2026-11-05）— 本轮实际发言 agent 收集器（执行序），
+@@ -1205,19 +1172,7 @@ async function runFanout(
+             ? {
+                 approval: {
+                   request: ({ nodeId, nodeName }: { nodeId: string; nodeName: string; preview: string; signal: AbortSignal }) =>
+-                    new Promise<'approved' | 'rejected'>((resolve) => {
+-                      const key = `${groupId}:${nodeId}`;
+-                      pendingApprovals.set(key, resolve);
+-                      // 外部取消（用户插话换轮/停止生成）→ 视作拒绝收场，不悬挂。
+-                      // signal 由执行器传入（runTeamDagFanout 的 opts.signal）。
+-                      // 这里借 postMessage 之外的通道不好拿 signal —— 挂 30 分钟
+-                      // 兜底超时（与 run 超时同量级，避免永久 pending 占内存）。
+-                      setTimeout(() => {
+-                        if (pendingApprovals.delete(key)) {
+-                          try { resolve('rejected'); } catch { /* settled */ }
+-                        }
+-                      }, 30 * 60_000).unref?.();
+-                    }).then((v) => {
++                    registerPendingApproval(groupId, nodeId).then((v) => {
+                       // 决定落一条系统消息（审批留痕；postMessage 失败不回传）。
+                       void pyPostMessage(groupId, {
+                         content: `[approval] ${nodeName} 的审批结果：${v === 'approved' ? '已批准 ✅' : '已拒绝 ❌'}`,
+@@ -1688,15 +1643,19 @@ router.post('/:id/messages', (req: Request, res: Response) => {
+ });
+ 
+ /**
+- * POST /api/groups/:id/approvals/:nodeId — 显式审批决定（2026-11-05）。
++ * POST /api/groups/:id/approvals/:nodeId — 显式审批决定（2026-11-05，决定路径①）。
+  * body: { decision: 'approve' | 'reject' }。
+  * 命中挂起 → resolve 执行器 promise（执行器会补系统留痕消息 + plan_card blocked）；
+  * 未命中 → 409（已决定/超时/无此挂起）。
++ * 处理器导出供回归测试直打（不起真 Express）。
+  */
+-router.post('/:id/approvals/:nodeId', (req: Request, res: Response) => {
++export function approvalDecisionHandler(
++  req: { params: { id: string; nodeId: string }; body?: unknown },
++  res: { status(code: number): { json(body: unknown): void }; json(body: unknown): void },
++): void {
+   const groupId = req.params.id;
+   const nodeId = req.params.nodeId;
+-  const decision = (req.body ?? {}).decision;
++  const decision = ((req.body ?? {}) as { decision?: unknown }).decision;
+   if (decision !== 'approve' && decision !== 'reject') {
+     res.status(400).json({
+       error: { code: 'BAD_DECISION', message: "decision must be 'approve' or 'reject'" },
+@@ -1716,7 +1675,9 @@ router.post('/:id/approvals/:nodeId', (req: Request, res: Response) => {
+     resolve(decision === 'approve' ? 'approved' : 'rejected');
+   } catch { /* resolver 已 settle — 幂等 */ }
+   res.json({ group_id: groupId, node_id: nodeId, decision });
+-});
++}
++
++router.post('/:id/approvals/:nodeId', approvalDecisionHandler);
+ 
+ export { router as groupsChatRouter };
+ export default router;

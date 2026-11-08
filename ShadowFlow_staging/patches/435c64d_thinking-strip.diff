@@ -1,0 +1,433 @@
+diff --git a/server/src/routes/__tests__/groups-chat-stream-strip.test.ts b/server/src/routes/__tests__/groups-chat-stream-strip.test.ts
+new file mode 100644
+index 0000000..bdcd238
+--- /dev/null
++++ b/server/src/routes/__tests__/groups-chat-stream-strip.test.ts
+@@ -0,0 +1,182 @@
++/**
++ * groups-chat-stream-strip.test.ts — B3 过程卡流式标签剥离接线测试（2026-11-07）。
++ *
++ * 背景：B3 过程卡把 text-delta 逐片点亮进卡体，模型（zhipu reasoning 包装 /
++ * 模型模仿 sf: 协议）会在正文流里写 `<sf:thinking>`/`<sf-thinking>` 标签，
++ * 原样 append 会让流式卡体「原始标签与正文混排」。groups-chat 现用
++ * createThinkingTagStream 在 emitPatch 前逐 chunk 剥定界符（思考内容保留，
++ * 与结构化 thinking-delta 通道对齐）。
++ *
++ * 用 vi.mock 驱动 runFanoutAsync（同 groups-chat-mention.test.ts 模式），
++ * fake callable 把标签**切断在 chunk 边界**吐出，验证：
++ *   - 串行路径：thinking_append_body 各片拼接无 `<sf` 残留、思考内容保留；
++ *   - DAG 路径（@ 命中单节点）：同上；
++ *   - 最终聊天回复仍走 stripThinking 整段剥除（气泡只留正文）。
++ *
++ * Run:
++ *   npx vitest run --config vitest.server.config.ts server/src/routes/__tests__/groups-chat-stream-strip.test.ts
++ */
++import { describe, it, expect, vi, beforeEach } from 'vitest';
++
++// ── mock 重依赖（模块级，import 路由前生效）────────────────────────────────
++
++const teamShape = {
++  members: ['pm', 'arch', 'dev'],
++  edges: [
++    { from: 'pm', to: 'arch', kind: 'sequential' },
++    { from: 'arch', to: 'dev', kind: 'sequential' },
++  ],
++  policy_matrix: {},
++  name: '三件套',
++};
++vi.mock('../../lib/team-source', () => ({
++  loadTeamForRun: vi.fn(() => ({ team: teamShape, errors: [] })),
++}));
++
++const agentRecords: Record<string, { agent_id: string; name: string; soul: string }> = {
++  pm: { agent_id: 'pm', name: '策划喵', soul: 'soul-pm' },
++  arch: { agent_id: 'arch', name: '架构汪', soul: 'soul-arch' },
++  dev: { agent_id: 'dev', name: '码农鸡', soul: 'soul-dev' },
++};
++
++const groupRecord = {
++  group_id: 'g1',
++  agent_ids: ['pm'] as string[],
++  messages: [] as Array<{ content: string; sender_kind: string; sender_name: string }>,
++  kind: 'group',
++  team_id: 't-default' as string | null,
++};
++const postedMessages: Array<{ content: string; sender_name: string; sender_kind: string; agent_id?: string }> = [];
++vi.mock('../../storage/groups-backend', () => ({
++  getGroupsBackend: () => ({
++    getGroup: vi.fn(async (id: string) => ({ ...groupRecord, group_id: id })),
++    appendMessage: vi.fn(async (_id: string, body: { content: string; sender_name: string; sender_kind: string; agent_id?: string }) => {
++      postedMessages.push(body);
++      groupRecord.messages.push(body as never);
++      return { ...body, message_id: `m-${postedMessages.length}` };
++    }),
++  }),
++}));
++
++vi.stubGlobal('fetch', vi.fn(async (url: string) => {
++  const m = /\/api\/agents\/([^/]+)$/.exec(String(url));
++  if (m) {
++    const a = agentRecords[decodeURIComponent(m[1])];
++    if (a) {
++      return new Response(JSON.stringify({ data: a }), {
++        status: 200,
++        headers: { 'Content-Type': 'application/json' },
++      });
++    }
++  }
++  return new Response('{}', { status: 404 });
++}));
++vi.mock('../../python-backend', () => ({ PYTHON_BACKEND_URL: 'http://127.0.0.1:1' }));
++
++// dispatcher：fake callable 按 streamScript 吐片（标签故意切断在 chunk 边界）。
++type StreamChunk = { type: 'text-delta'; value: string };
++let streamScript: StreamChunk[] = [];
++vi.mock('../../transport/dispatcher', () => ({
++  resolveCallable: () => ({
++    turn: async function* () {
++      for (const c of streamScript) yield c;
++    },
++  }),
++}));
++
++// gateway run：内存 gw，逐帧记录供断言。
++interface RecordedPatch { id: string; op: string; chunk?: string }
++interface RecordedMsg { id: string; kind: string; label?: string; status?: string }
++const gwPatches: RecordedPatch[] = [];
++const gwMessages: RecordedMsg[] = [];
++vi.mock('../../lib/gateway-run', () => ({
++  startGatewayRun: vi.fn(() => {
++    let n = 0;
++    return {
++      turnId: 'turn-1',
++      nextId: () => `gw-${++n}`,
++      emitMessage: vi.fn((m: RecordedMsg) => {
++        gwMessages.push(m);
++      }),
++      emitPatch: vi.fn((p: RecordedPatch) => {
++        gwPatches.push(p);
++      }),
++      finish: vi.fn(),
++    };
++  }),
++}));
++
++// worktree：非 git 环境短路。
++vi.mock('../../lib/worktree-manager', () => ({
++  isGitWorkable: vi.fn(async () => false),
++  prepareWorktree: vi.fn(async () => null),
++  integrateAll: vi.fn(async () => []),
++  commitWorktree: vi.fn(async () => null),
++}));
++
++import { runFanoutAsync } from '../groups-chat';
++
++/** 标签切断在 chunk 边界的流式脚本：开标签 / 闭标签 / 连字符形态都被切开。 */
++const NASTY_STREAM: StreamChunk[] = [
++  { type: 'text-delta', value: '<sf:think' },
++  { type: 'text-delta', value: 'ing>让我想想</sf:thinking>你好' },
++  { type: 'text-delta', value: '，世界<sf-thinking>边想边写</sf-thin' },
++  { type: 'text-delta', value: 'king>。完毕' },
++];
++
++/** 定界符剥掉后应留在卡体的内容（思考内容保留）——与 chunk 切法无关。 */
++const EXPECTED_CARD_BODY = '让我想想你好，世界边想边写。完毕';
++/** stripThinking 整段剥除后应落库的聊天回复（气泡只留正文）。 */
++const EXPECTED_REPLY = '你好，世界。完毕';
++
++/** 取本轮 thinking 卡的所有 append 片拼接。 */
++function cardBody(): string {
++  const card = gwMessages.find((m) => m.kind === 'thinking');
++  expect(card).toBeTruthy();
++  return gwPatches
++    .filter((p) => p.op === 'thinking_append_body' && p.id === card!.id)
++    .map((p) => p.chunk ?? '')
++    .join('');
++}
++
++function agentReply(): string {
++  const m = postedMessages.find((x) => x.sender_kind === 'agent');
++  expect(m).toBeTruthy();
++  return m!.content;
++}
++
++beforeEach(() => {
++  postedMessages.length = 0;
++  groupRecord.messages = [];
++  groupRecord.agent_ids = ['pm'];
++  groupRecord.team_id = 't-default';
++  teamShape.members = ['pm', 'arch', 'dev'];
++  gwPatches.length = 0;
++  gwMessages.length = 0;
++  streamScript = NASTY_STREAM.map((c) => ({ ...c }));
++});
++
++describe('B3 过程卡流式标签剥离 — 串行路径', () => {
++  it('跨 chunk 切断的定界符不闪现、思考内容保留、回复仍整段剥除', async () => {
++    (teamShape as { members: string[] }).members = []; // team 读不到 → 串行
++    await runFanoutAsync('g1', 'byok:zhipu', undefined, {}, '干活');
++    // 卡体：逐片均无 `<sf` 残片（含半截标签），拼接 = 剥定界符后的内容。
++    const card = gwMessages.find((m) => m.kind === 'thinking');
++    const appends = gwPatches.filter((p) => p.op === 'thinking_append_body' && p.id === card!.id);
++    for (const p of appends) expect(p.chunk ?? '').not.toContain('<sf');
++    expect(cardBody()).toBe(EXPECTED_CARD_BODY);
++    // 聊天回复：stripThinking 整段剥除（含思考内容），只留正文。
++    expect(agentReply()).toBe(EXPECTED_REPLY);
++  });
++});
++
++describe('B3 过程卡流式标签剥离 — DAG 路径', () => {
++  it('@ 命中单节点：卡体剥定界符、回复整段剥除（与串行一致）', async () => {
++    await runFanoutAsync('g1', 'byok:zhipu', undefined, {}, '@策划喵 干活');
++    const card = gwMessages.find((m) => m.kind === 'thinking');
++    const appends = gwPatches.filter((p) => p.op === 'thinking_append_body' && p.id === card!.id);
++    for (const p of appends) expect(p.chunk ?? '').not.toContain('<sf');
++    expect(cardBody()).toBe(EXPECTED_CARD_BODY);
++    expect(agentReply()).toBe(EXPECTED_REPLY);
++  });
++});
+diff --git a/server/src/routes/__tests__/groups-chat-thinking-strip.test.ts b/server/src/routes/__tests__/groups-chat-thinking-strip.test.ts
+index 620b7ac..d4d4bd0 100644
+--- a/server/src/routes/__tests__/groups-chat-thinking-strip.test.ts
++++ b/server/src/routes/__tests__/groups-chat-thinking-strip.test.ts
+@@ -9,12 +9,15 @@
+  *     `byok:<id>`（替代无脑 cli:claude——CLI 挂起时群聊 thinking 卡永远
+  *     streaming 的根因）；无 BYOK → 'cli:claude' 历史兜底；settings 异常
+  *     NeverThrow。
++ *   - createThinkingTagStream（2026-11-07）：B3 过程卡逐 chunk 流式剥
++ *     `<sf[:-]thinking>` 定界符（思考内容保留）；跨 chunk 切断的标签 hold
++ *     住不闪现，流中断残段 flush 丢弃。
+  *
+  * Run:
+  *   npx vitest run --config vitest.server.config.ts server/src/routes/__tests__/groups-chat-thinking-strip.test.ts
+  */
+ import { describe, it, expect } from 'vitest';
+-import { stripThinking, pickDefaultExecutor } from '../groups-chat';
++import { stripThinking, pickDefaultExecutor, createThinkingTagStream } from '../groups-chat';
+ 
+ describe('stripThinking — 最终回复剥离 <sf:thinking> 思考段', () => {
+   it('成对标签整体剥离，正文保留', () => {
+@@ -74,6 +77,71 @@ describe('stripThinking — 最终回复剥离 <sf:thinking> 思考段', () => {
+   });
+ });
+ 
++describe('createThinkingTagStream — 流式定界符剥离（2026-11-07 B3 过程卡）', () => {
++  it('无标签正文逐 chunk 原样透传', () => {
++    const f = createThinkingTagStream();
++    expect(f.push('你好')).toBe('你好');
++    expect(f.push('，世界')).toBe('，世界');
++    f.flush();
++  });
++
++  it('思考内容保留、仅剥定界符（与 stripThinking 整段丢弃语义对齐）', () => {
++    const f = createThinkingTagStream();
++    expect(f.push('<sf:thinking>想一下</sf:thinking>结论')).toBe('想一下结论');
++    f.flush();
++  });
++
++  it('开标签被切断在 chunk 尾 → 不闪现半截标签，补全后定界符消失', () => {
++    const f = createThinkingTagStream();
++    expect(f.push('<sf:thinkin')).toBe('');
++    expect(f.push('g>想</sf:thinkin')).toBe('想');
++    expect(f.push('g>好')).toBe('好');
++    f.flush();
++  });
++
++  it('连字符形态 + 多段混排：定界符全消失，内容按序保留', () => {
++    const f = createThinkingTagStream();
++    const out =
++      f.push('<sf-thinking>英文思考</sf-thinking>正文') + f.push('<sf:thinking>二想');
++    expect(out).toBe('英文思考正文二想');
++    f.flush();
++  });
++
++  it('带属性开标签切断在属性段（属性含 < 也不误切）', () => {
++    const f = createThinkingTagStream();
++    expect(f.push('<sf:thinking x=')).toBe('');
++    expect(f.push('y>内容</sf:thinking>')).toBe('内容');
++    f.flush();
++  });
++
++  it('裸 `<` 结尾 hold 一拍，下一片证实非标签立即释放（拼接无损）', () => {
++    const f = createThinkingTagStream();
++    expect(f.push('a <')).toBe('a '); // hold 起点在 `<`，之前的字符照常放出
++    expect(f.push(' b')).toBe('< b');
++    f.flush();
++  });
++
++  it('字面 `<` 非标签（`< b`）不误伤、不 hold', () => {
++    const f = createThinkingTagStream();
++    expect(f.push('a < b > c')).toBe('a < b > c');
++    f.flush();
++  });
++
++  it('名字被空白提前终结的碎片按字面文本放行（不吞正文）', () => {
++    const f = createThinkingTagStream();
++    expect(f.push('<sf:thi <b')).toBe('<sf:thi <b');
++    f.flush();
++  });
++
++  it('流中断（未补全的疑似标签残段）flush 丢弃，不以碎片进卡体', () => {
++    const f = createThinkingTagStream();
++    expect(f.push('好<sf:thin')).toBe('好');
++    f.flush(); // void：残段直接丢弃
++    expect(f.push('king>迟到的补全')).toBe('king>迟到的补全'); // flush 后按新字面文本
++    f.flush();
++  });
++});
++
+ describe('pickDefaultExecutor — 默认 executor 回退', () => {
+   it('settings/byok 有 enabled+key 的 provider → byok:<id>', () => {
+     // 本机 settings 已配置 zhipu（enabled + apiKey）→ 默认即 byok:zhipu。
+diff --git a/server/src/routes/groups-chat.ts b/server/src/routes/groups-chat.ts
+index 01a6306..8ed0e95 100644
+--- a/server/src/routes/groups-chat.ts
++++ b/server/src/routes/groups-chat.ts
+@@ -409,6 +409,87 @@ export function stripThinking(s: string): string {
+     .replace(/<sf[:-]thinking(?:\s[^>]*)?>[\s\S]*$/g, '');
+ }
+ 
++// ── 2026-11-07 流式标签剥离 ──────────────────────────────────────────────
++/** 完整标签名（开/闭 × 冒号/连字符），与 stripThinking 双分隔符规则一致。 */
++const THINK_TAG_NAMES = ['sf:thinking', 'sf-thinking', '/sf:thinking', '/sf-thinking'];
++/** 完整开/闭标签（属性可选）——整体即「定界符」，从流里消失。 */
++const THINK_TAG_DELIM_RE = /<\/?sf[:-]thinking(?:\s[^>]*)?>/g;
++
++/**
++ * 尾部疑似「被切断的标签开头」→ 返回该后缀起点（最长存活后缀），否则 -1。
++ *
++ * 存活判定（core = 最后候选 `<` 之后的文本）：
++ *   - 裸 `<` / `</` 等名字尚未跑偏的前缀 → 存活（等后续 chunk 补全）；
++ *   - 名字段被空白提前终结（`<sf:thi x`）→ 名字必须**完整等于**标签名且
++ *     属性段未出现 `>` 才存活，否则字面文本；
++ *   - 无空白的名字段是完整标签名的前缀即存活；含 `>` 自然出局。
++ * 取**最早**存活的 `<`（最长后缀）——`<sf:thinking x=<sf:thi` 这类属性段里
++ * 带 `<` 的形态要整体 hold，不能只 hold 尾巴。
++ */
++function partialTagStart(rest: string): number {
++  for (let i = rest.indexOf('<'); i >= 0; i = rest.indexOf('<', i + 1)) {
++    const core = rest.slice(i + 1);
++    if (!core) return i; // 裸 '<' 结尾 — 可能是标签第一字节
++    if (/\s/.test(core[0])) continue; // `< x` 不可能是标签
++    const ws = core.search(/\s/);
++    const name = ws < 0 ? core : core.slice(0, ws);
++    const alive = ws < 0
++      ? THINK_TAG_NAMES.some((n) => n.startsWith(name))
++      : THINK_TAG_NAMES.includes(name) && !core.slice(ws).includes('>');
++    if (alive) return i;
++  }
++  return -1;
++}
++
++/**
++ * 逐 chunk 流式剥 `<sf[:-]thinking>` **定界符**（思考内容保留）——B3 过程卡
++ * 把 text-delta 逐片点亮进卡体，模型（zhipu reasoning 包装 / 模型模仿 sf:
++ * 协议）会在正文流里写思考标签，原样 append 会让流式卡体「原始标签与正文
++ * 混排」（2026-11-07 截图反馈）。
++ *
++ * 与 stripThinking 的分工：
++ *   - stripThinking：**整段**替换，落库前剥最终回复（思考内容整段丢弃，
++ *     气泡只留正文）；
++ *   - 本状态机：**逐 chunk**，只剥定界符、思考内容保留在卡体——与结构化
++ *     thinking-delta 通道（纯思考文本点亮同一张卡）对齐，过程细节不丢。
++ *
++ * 跨 chunk 边界：标签会被切断在任意字节（`<sf:thin` | `king>…`），疑似
++ * 标签前缀 hold 住等后续 chunk 补全再判，绝不闪现半截标签；流结束时
++ * flush() 丢弃仍未补全的残段（未完成的开标签不该以碎片形态进卡体）。
++ */
++export function createThinkingTagStream(): {
++  push(piece: string): string;
++  flush(): void;
++} {
++  let pending = '';
++  return {
++    push(piece: string): string {
++      const s = pending + piece;
++      pending = '';
++      let out = '';
++      let last = 0;
++      THINK_TAG_DELIM_RE.lastIndex = 0;
++      let m: RegExpExecArray | null;
++      while ((m = THINK_TAG_DELIM_RE.exec(s)) !== null) {
++        out += s.slice(last, m.index);
++        last = m.index + m[0].length;
++      }
++      const rest = s.slice(last);
++      const hold = partialTagStart(rest);
++      if (hold >= 0) {
++        out += rest.slice(0, hold);
++        pending = rest.slice(hold);
++      } else {
++        out += rest;
++      }
++      return out;
++    },
++    flush(): void {
++      pending = '';
++    },
++  };
++}
++
+ /**
+  * G1（2026-06-13）— 网关 fanout 把 callable.turn() 吐出的 tool-use/tool-result
+  * chunk 投影成 tool_call/tool_echo TimelineMessage，让会话 Timeline 真显示工具
+@@ -1079,6 +1160,8 @@ async function runFanout(
+             }
+             let buf = '';
+             let errMsg = '';
++            // 2026-11-07 流式标签剥离 — 卡体 append 前剥 <sf[:-]thinking> 定界符。
++            const thinkStream = createThinkingTagStream();
+             try {
+               const callable = resolveCallable(executor, { apiKey, model, workspace: wt?.dir ?? workspace });
+               for await (const chunk of callable.turn({
+@@ -1093,7 +1176,10 @@ async function runFanout(
+                   buf += piece;
+                   // B3 — 流式片段就地点亮（现有解析粒度 = event:text 的干净文本）。
+                   if (gw && thinkingId && piece) {
+-                    gw.emitPatch({ id: thinkingId, op: 'thinking_append_body', chunk: piece });
++                    const shown = thinkStream.push(piece);
++                    if (shown) {
++                      gw.emitPatch({ id: thinkingId, op: 'thinking_append_body', chunk: shown });
++                    }
+                   }
+                 } else if (chunk.type === 'thinking-delta') {
+                   // 2026-11-04 — API 路结构化思考通道：只点亮过程卡，不进 buf。
+@@ -1113,6 +1199,8 @@ async function runFanout(
+               errMsg = e instanceof Error ? e.message : String(e);
+             }
+             if (gw && thinkingId) {
++              // 流收口：未补全的疑似标签残段丢弃，不以碎片形态进卡体。
++              thinkStream.flush();
+               const elapsed = Date.now() - startedAt;
+               gw.emitPatch({ id: thinkingId, op: 'thinking_finalize', duration_ms: elapsed });
+               if (errMsg) {
+@@ -1313,6 +1401,8 @@ async function runFanout(
+       const ctrl = swapDagRun(groupId, activeDagRuns);
+       let buf = '';
+       let errMsg = '';
++      // 2026-11-07 流式标签剥离 — 卡体 append 前剥 <sf[:-]thinking> 定界符。
++      const thinkStream = createThinkingTagStream();
+       // worktree 隔离 — 该 agent 专属目录（git 仓库 workspace 时）。
+       const wt = serialWt.get(agentId);
+       try {
+@@ -1329,7 +1419,10 @@ async function runFanout(
+             buf += piece;
+             // B3 — 流式片段就地点亮（现有解析粒度 = event:text 的干净文本）。
+             if (gw && thinkingId && piece) {
+-              gw.emitPatch({ id: thinkingId, op: 'thinking_append_body', chunk: piece });
++              const shown = thinkStream.push(piece);
++              if (shown) {
++                gw.emitPatch({ id: thinkingId, op: 'thinking_append_body', chunk: shown });
++              }
+             }
+           } else if (chunk.type === 'thinking-delta') {
+             // 2026-11-04 — API 路结构化思考通道（ApiClientCallable reasoning_content
+@@ -1354,6 +1447,8 @@ async function runFanout(
+       // streaming（刷新后回放依旧转圈）。中断 = 静默收口：finalize +
+       // msg_foot done，但不发错误 raw 卡、不发聊天消息（与停止语义一致）。
+       if (gw && thinkingId) {
++        // 流收口：未补全的疑似标签残段丢弃，不以碎片形态进卡体。
++        thinkStream.flush();
+         const elapsed = Date.now() - startedAt;
+         gw.emitPatch({ id: thinkingId, op: 'thinking_finalize', duration_ms: elapsed });
+         if (errMsg && !ctrl.signal.aborted) {

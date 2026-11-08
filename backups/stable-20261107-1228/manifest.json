@@ -1,0 +1,20 @@
+{
+  "name": "stable-20261107-1228",
+  "created_at": "2026-11-07T12:31:21",
+  "description": "审批中心改造前已验证可运行的前后端源码、配置与 SQLite 一致性快照",
+  "excluded": [
+    "node_modules",
+    "dist",
+    ".venv",
+    "缓存",
+    "便携 Node 运行时"
+  ],
+  "databases": [
+    "ShadowFlow-backend\\.shadowflow\\app.sqlite",
+    "ShadowFlow-backend\\.shadowflow\\opc.sqlite",
+    "ShadowFlow-backend\\.shadowflow\\runtime.sqlite",
+    "ShadowFlow-backend\\.shadowflow\\backups\\opc-before-test-cleanup-20261107-1212.sqlite",
+    "ShadowFlow-backend\\server\\.shadowflow\\app.sqlite"
+  ],
+  "restore": "停止所有 ShadowFlow 服务后，在根目录执行 powershell -ExecutionPolicy Bypass -File .\\rollback-stable.ps1"
+}

@@ -1,0 +1,35 @@
+
+> shadowflow-server@1.0.0 test:cli
+> tsx ../tests/cli-spawn-smoke.test.ts
+
+
+=== CLI spawn smoke tests ===
+
+Probing each entry in KNOWN_CLIS with `<binary> <version_arg>` …
+
+id               binary           status   sample / reason
+──────────────────────────────────────────────────────────────
+claude           claude           ⊘ skip   not on PATH
+codex            codex            ⊘ skip   not on PATH
+gh-copilot       gh               ⊘ skip   not on PATH
+gemini           gemini           ⊘ skip   not on PATH
+openclaw         openclaw         ⊘ skip   not on PATH
+opencode         opencode         ⊘ skip   not on PATH
+cursor-agent     cursor-agent     ⊘ skip   not on PATH
+qwen-coder       qwen-coder       ⊘ skip   not on PATH
+cline            cline            ⊘ skip   not on PATH
+aider            aider            ⊘ skip   not on PATH
+cursor           cursor           ⊘ skip   not on PATH
+windsurf-cli     windsurf         ⊘ skip   not on PATH
+devin            devin            ⊘ skip   not on PATH
+hermes           hermes           ⊘ skip   not on PATH
+kimi             kimi             ⊘ skip   not on PATH
+qoder            qoder            ⊘ skip   not on PATH
+pi               pi               ⊘ skip   not on PATH
+kiro             kiro             ⊘ skip   not on PATH
+kilo             kilo             ⊘ skip   not on PATH
+vibe             vibe             ⊘ skip   not on PATH
+deepseek-tui     deepseek         ⊘ skip   not on PATH
+autoresearchclaw researchclaw     ⊘ skip   not on PATH
+
+Result: 0 pass, 22 skip (not installed), 0 fail

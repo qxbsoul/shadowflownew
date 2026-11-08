@@ -1,0 +1,78 @@
+跑 62 个脚本式测试（并发 4）…
+
+PASS  server/src/acp-detector.test.ts  (0.6s)
+PASS  server/src/assembler.test.ts  (0.4s)
+PASS  server/src/assembly/__tests__/rules.test.ts  (0.4s)
+PASS  server/src/assembly/__tests__/select.test.ts  (0.4s)
+PASS  server/src/assembly/__tests__/skills.test.ts  (0.4s)
+PASS  server/src/cli-detector.test.ts  (1.2s)
+PASS  server/src/critic.test.ts  (0.5s)
+PASS  server/src/design-systems.test.ts  (0.6s)
+PASS  server/src/exporters/markdown.test.ts  (0.8s)
+PASS  server/src/exporters/pdf.test.ts  (6.0s)
+PASS  server/src/lib/__tests__/anthropic-block-adapter.test.ts  (0.6s)
+PASS  server/src/lib/__tests__/assembly-routing.test.ts  (0.4s)
+PASS  server/src/lib/__tests__/conversation-runtime.test.ts  (0.4s)
+PASS  server/src/lib/__tests__/conversation-types.test.ts  (0.4s)
+PASS  server/src/lib/__tests__/event-naming.test.ts  (0.3s)
+PASS  server/src/lib/__tests__/intent-router.test.ts  (0.4s)
+PASS  server/src/lib/__tests__/permission-policy.test.ts  (0.4s)
+PASS  server/src/lib/__tests__/pipe-chunks-json.test.ts  (0.8s)
+PASS  server/src/lib/__tests__/plain-conversation.test.ts  (0.4s)
+PASS  server/src/lib/__tests__/run-event-bus.test.ts  (0.4s)
+PASS  server/src/lib/__tests__/timeline-projector.test.ts  (0.4s)
+PASS  server/src/lib/__tests__/tool-approval.test.ts  (0.4s)
+PASS  server/src/lib/__tests__/tool-runner-approval.test.ts  (0.4s)
+PASS  server/src/lib/__tests__/tool-spec.test.ts  (0.3s)
+PASS  server/src/lib/classify-error.test.ts  (0.4s)
+PASS  server/src/lib/skill-compiler/__tests__/compile-bmad.test.ts  (0.6s)
+PASS  server/src/lib/skill-compiler/__tests__/compile-simple.test.ts  (0.7s)
+PASS  server/src/lib/tools/builtin/__tests__/read-skill-roster.test.ts  (0.7s)
+PASS  server/src/lib/tools/builtin/__tests__/sandbox.test.ts  (0.5s)
+PASS  server/src/lint.test.ts  (0.4s)
+PASS  server/src/loaders/design-system-loader.test.ts  (0.5s)
+PASS  server/src/loaders/skill-loader.test.ts  (0.9s)
+PASS  server/src/loaders/skill-side-files.test.ts  (0.5s)
+PASS  server/src/memory-lessons.test.ts  (0.4s)
+PASS  server/src/parser-agent-extension.test.ts  (0.3s)
+PASS  server/src/parser.test.ts  (0.4s)
+PASS  server/src/parsers/cli-streams/additive-normalization.test.ts  (0.4s)
+PASS  server/src/parsers/cli-streams/cli-streams.test.ts  (0.4s)
+PASS  server/src/prompt-assembly.test.ts  (0.4s)
+PASS  server/src/prompts/__tests__/compose-multi-turn-prompt.test.ts  (0.4s)
+PASS  server/src/protocols/jsonrpc-stdio.test.ts  (0.7s)
+PASS  server/src/proxy-fallback.test.ts  (0.6s)
+PASS  server/src/routes/artifacts.test.ts  (0.6s)
+PASS  server/src/routes/export.test.ts  (1.0s)
+PASS  server/src/routes/groups-chat.test.ts  (1.4s)
+FAIL  server/src/routes/llm.test.ts  (1.4s)
+      exit=1
+        ok: key from Authorization header was extracted (got error.type=PROVIDER_ERROR)
+      ---
+      FAILED: 9 assertion(s)
+PASS  server/src/skill-reader/__tests__/parse-bmad.test.ts  (0.4s)
+PASS  server/src/skill-reader/__tests__/parse-simple.test.ts  (0.5s)
+PASS  server/src/storage/conversations.test.ts  (0.8s)
+PASS  server/src/storage/projects.test.ts  (0.7s)
+PASS  server/src/storage/runs.test.ts  (0.8s)
+PASS  server/src/storage/settings.test.ts  (0.7s)
+PASS  server/src/storage/sqlite.test.ts  (0.6s)
+PASS  server/src/token-usage.test.ts  (0.5s)
+PASS  server/src/transport/api-clients/__tests__/anthropic-api-client.test.ts  (0.5s)
+PASS  server/src/transport/api-clients/__tests__/claude-code-cli-api-client.test.ts  (0.4s)
+PASS  server/src/transport/api-clients/__tests__/codex-cli-api-client.test.ts  (0.4s)
+PASS  server/src/transport/api-clients/__tests__/google-api-client.test.ts  (0.4s)
+PASS  server/src/transport/api-clients/__tests__/openai-compat-api-client.test.ts  (0.5s)
+PASS  server/src/transport/spawners/acp.test.ts  (1.4s)
+FAIL  server/src/transport/spawners/cli.test.ts  (2.6s)
+      exit=1
+        PASS  runCliSpawn yields CLI_UNKNOWN for unregistered id
+      ────────────────────────────────────────────
+      Total: 11 | PASS: 9 | FAIL: 2
+PASS  server/src/transport/spawners/mcp.test.ts  (1.3s)
+
+脚本式测试：60 通过 / 2 失败 / 共 62
+
+失败清单：
+  - server/src/routes/llm.test.ts
+  - server/src/transport/spawners/cli.test.ts

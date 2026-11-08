@@ -1,0 +1,116 @@
+D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\.venv\Lib\site-packages\pytest_asyncio\plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+============================= test session starts =============================
+platform win32 -- Python 3.12.15, pytest-9.2.0, pluggy-1.7.0
+rootdir: D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow
+configfile: pyproject.toml
+plugins: anyio-4.16.0, platformdirs-4.14.5, asyncio-1.4.1.post1, cov-7.1.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 106 items
+
+tests\mcp_servers\test_fs_server.py .........................            [ 23%]
+tests\mcp_servers\test_shell_server.py ................................. [ 54%]
+....                                                                     [ 58%]
+tests\mcp_servers\test_web_server.py .............                       [ 70%]
+tests\test_tool_credentials.py ...........                               [ 81%]
+tests\test_tool_registry_api.py ................                         [ 96%]
+tests\test_assembly_activation.py ..                                     [ 98%]
+tests\test_highlevel_schema.py ..                                        [100%]
+
+============================== warnings summary ===============================
+shadowflow\runtime\acp\server.py:43
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\shadowflow\runtime\acp\server.py:43: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    class AgentSession(BaseModel):
+
+shadowflow\server.py:335
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\shadowflow\server.py:335: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+.venv\Lib\site-packages\fastapi\applications.py:4723
+.venv\Lib\site-packages\fastapi\applications.py:4723
+.venv\Lib\site-packages\fastapi\applications.py:4723
+.venv\Lib\site-packages\fastapi\applications.py:4723
+.venv\Lib\site-packages\fastapi\applications.py:4723
+.venv\Lib\site-packages\fastapi\applications.py:4723
+.venv\Lib\site-packages\fastapi\applications.py:4723
+.venv\Lib\site-packages\fastapi\applications.py:4723
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\.venv\Lib\site-packages\fastapi\applications.py:4723: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)  # ty: ignore[deprecated]
+
+shadowflow\server.py:350
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\shadowflow\server.py:350: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+shadowflow\server.py:362
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\shadowflow\server.py:362: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+shadowflow\server.py:372
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\shadowflow\server.py:372: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+shadowflow\server.py:389
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\shadowflow\server.py:389: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+shadowflow\server.py:405
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\shadowflow\server.py:405: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+shadowflow\server.py:421
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\shadowflow\server.py:421: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+shadowflow\server.py:460
+  D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\shadowflow\server.py:460: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("shutdown")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+====================== 106 passed, 17 warnings in 31.61s ======================

@@ -1,0 +1,556 @@
+diff --git a/server/src/__tests__/memory-lessons-prompt-block.test.ts b/server/src/__tests__/memory-lessons-prompt-block.test.ts
+new file mode 100644
+index 0000000..e129de8
+--- /dev/null
++++ b/server/src/__tests__/memory-lessons-prompt-block.test.ts
+@@ -0,0 +1,142 @@
++/**
++ * memory-lessons-prompt-block.test.ts — promptBlock 统一入口（2026-11-07 记忆闭环）。
++ *
++ * 背景：经验记忆进提示词的「开关/条数/格式」此前在 workflow/executor.ts 与
++ * routes/run-sessions.ts 各有一份内联拷贝，聊天面（groups-chat）则完全没有
++ * 召回。抽成 storage/memory-lessons.promptBlock 后三处共用，本文件锁语义：
++ *   - 单域：与旧内联实现逐字一致（标题、通用条目、跨域不串、topK、开关）
++ *   - 多域：合并召回按 id 去重（通用条目天然双域命中）、整体按
++ *     score/hits/updated_at 排序、总量截 topK
++ *   - recallTopK 1..12 截断；autoLearn=false 不召回；空库返回 ''
++ *
++ * Run:
++ *   npx vitest run --project=server server/src/__tests__/memory-lessons-prompt-block.test.ts
++ */
++import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
++import { mkdtempSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++
++let tmp: string;
++let origCwd: string;
++// eslint-disable-next-line @typescript-eslint/consistent-type-imports
++let sqlite: typeof import('../storage/sqlite');
++// eslint-disable-next-line @typescript-eslint/consistent-type-imports
++let lessons: typeof import('../storage/memory-lessons');
++// eslint-disable-next-line @typescript-eslint/consistent-type-imports
++let settings: typeof import('../storage/settings');
++
++beforeAll(async () => {
++  origCwd = process.cwd();
++  tmp = mkdtempSync(path.join(tmpdir(), 'sf-lessons-'));
++  process.chdir(tmp);
++  sqlite = await import('../storage/sqlite');
++  sqlite._resetForTests();
++  sqlite.getDb();
++  lessons = await import('../storage/memory-lessons');
++  settings = await import('../storage/settings');
++});
++
++afterAll(() => {
++  process.chdir(origCwd);
++  try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }
++});
++
++beforeEach(() => {
++  sqlite.getDb().prepare('DELETE FROM memory_lessons').run();
++  settings.deleteSetting('memory.recallTopK');
++  settings.deleteSetting('memory.autoLearn');
++});
++
++/** 统计块里的条目行（"- [xxx]" 开头）。 */
++function countRows(block: string): number {
++  return block.split('\n').filter((l) => l.startsWith('- [')).length;
++}
++
++describe('promptBlock — 单域（旧内联语义逐字对齐）', () => {
++  it('空库 → \'\'（无标题、无废话）', () => {
++    expect(lessons.promptBlock('any-scope')).toBe('');
++  });
++
++  it('通用 + 同域进块，跨域不串；标题「## 过往经验」', () => {
++    lessons.remember({ content: '交付必须附证据链', scope_key: '', kind: 'lesson', score: 0.9 });
++    lessons.remember({ content: '烘焙文案要带口味词', scope_key: 'copywriting', kind: 'lesson', score: 0.8 });
++    lessons.remember({ content: '出海只看东南亚', scope_key: 'overseas', kind: 'lesson', score: 0.95 });
++    const block = lessons.promptBlock('copywriting');
++    expect(block).toContain('## 过往经验（自动沉淀，供参考）');
++    expect(block).toContain('交付必须附证据链');
++    expect(block).toContain('烘焙文案要带口味词');
++    expect(block).not.toContain('出海只看东南亚');
++  });
++
++  it('recallTopK=1 → 只带 1 条（按 score 最高）', () => {
++    lessons.remember({ content: '低分条', scope_key: 's1', kind: 'lesson', score: 0.1 });
++    lessons.remember({ content: '高分条', scope_key: 's1', kind: 'lesson', score: 0.9 });
++    settings.setSetting('memory.recallTopK', 1);
++    const block = lessons.promptBlock('s1');
++    expect(countRows(block)).toBe(1);
++    expect(block).toContain('高分条');
++    expect(block).not.toContain('低分条');
++  });
++
++  it('recallTopK=0（非法）→ 回落默认 4', () => {
++    for (let i = 0; i < 5; i++) {
++      lessons.remember({ content: `条目${i}`, scope_key: 's2', kind: 'lesson', score: 0.5 + i * 0.01 });
++    }
++    settings.setSetting('memory.recallTopK', 0);
++    expect(countRows(lessons.promptBlock('s2'))).toBe(4);
++  });
++
++  it('autoLearn=false → 不召回（即便库里有）', () => {
++    lessons.remember({ content: '不该出现', scope_key: 's3', kind: 'lesson', score: 0.9 });
++    settings.setSetting('memory.autoLearn', false);
++    expect(lessons.promptBlock('s3')).toBe('');
++  });
++});
++
++describe('promptBlock — 多域合并（聊天召回用）', () => {
++  it('两域 + 通用合并去重：通用只出现一次，跨域不进', () => {
++    lessons.remember({ content: '通用经验', scope_key: '', kind: 'lesson', score: 0.9 });
++    lessons.remember({ content: 'A 域经验', scope_key: 'agent-a', kind: 'lesson', score: 0.8 });
++    lessons.remember({ content: '聊天域经验', scope_key: 'chat-gateway', kind: 'lesson', score: 0.85 });
++    lessons.remember({ content: '无关域经验', scope_key: 'writer', kind: 'lesson', score: 0.99 });
++    const block = lessons.promptBlock(['agent-a', 'chat-gateway']);
++    expect(block).toContain('通用经验');
++    expect(block).toContain('A 域经验');
++    expect(block).toContain('聊天域经验');
++    expect(block).not.toContain('无关域经验');
++    // 去重：通用条目只一行
++    expect(countRows(block)).toBe(3);
++    expect(block.split('通用经验').length - 1).toBe(1);
++  });
++
++  it('合并后整体按 score 排序、总量截 topK', () => {
++    lessons.remember({ content: 'A1 高分', scope_key: 'agent-a', kind: 'lesson', score: 0.95 });
++    lessons.remember({ content: 'A2 低分', scope_key: 'agent-a', kind: 'lesson', score: 0.2 });
++    lessons.remember({ content: 'G1 中分', scope_key: 'chat-gateway', kind: 'lesson', score: 0.6 });
++    lessons.remember({ content: 'G2 中低分', scope_key: 'chat-gateway', kind: 'lesson', score: 0.4 });
++    settings.setSetting('memory.recallTopK', 2);
++    const block = lessons.promptBlock(['agent-a', 'chat-gateway']);
++    expect(countRows(block)).toBe(2);
++    expect(block).toContain('A1 高分');
++    expect(block).toContain('G1 中分');
++    expect(block).not.toContain('A2 低分');
++    expect(block).not.toContain('G2 中低分');
++  });
++
++  it('recallTopK 超上限 12 → 最多 12 条（防记忆塞满提示词）', () => {
++    // 每域 8 条（MAX_PER_SCOPE 内不触发归档），两域合并 16 → 截 12。
++    for (let i = 0; i < 8; i++) {
++      lessons.remember({ content: `a${i}`, scope_key: 'agent-a', kind: 'lesson', score: 0.5 });
++      lessons.remember({ content: `g${i}`, scope_key: 'chat-gateway', kind: 'lesson', score: 0.5 });
++    }
++    settings.setSetting('memory.recallTopK', 999);
++    expect(countRows(lessons.promptBlock(['agent-a', 'chat-gateway']))).toBe(12);
++  });
++
++  it('autoLearn=false → 多域同样不召回', () => {
++    lessons.remember({ content: '不该出现', scope_key: 'chat-gateway', kind: 'lesson', score: 0.9 });
++    settings.setSetting('memory.autoLearn', false);
++    expect(lessons.promptBlock(['agent-a', 'chat-gateway'])).toBe('');
++  });
++});
+diff --git a/server/src/routes/__tests__/groups-chat-lessons-system.test.ts b/server/src/routes/__tests__/groups-chat-lessons-system.test.ts
+new file mode 100644
+index 0000000..5d7d694
+--- /dev/null
++++ b/server/src/routes/__tests__/groups-chat-lessons-system.test.ts
+@@ -0,0 +1,199 @@
++/**
++ * groups-chat-lessons-system.test.ts — 记忆闭环接线（2026-11-07）。
++ *
++ * 走查缺口：memory_lessons 写入侧（chat 回合失败/中断 → recordRunLesson，域
++ * 'chat-gateway'）早已接通，但 groups-chat 两条派发路径的 system 只有 soul，
++ * 沉淀的经验永远读不回来（recallTopK 在聊天面从未生效）。本文件锁接线：
++ *   - chatLessonsBlock：召回域合并（agent 专属 + chat-gateway + 通用）、去重、
++ *     跨域不串（promptBlock 语义本体由
++ *     src/__tests__/memory-lessons-prompt-block.test.ts 锁）
++ *   - 串行路径（DM / 无 team 群）：callable.turn 的 system = soul + 经验块
++ *   - DAG 路径（team 群）：callAgent 的 system 同款，且各 agent 只带自己的域
++ *
++ * 真实 SQLite（临时 cwd 隔离）+ 其余重依赖 mock（groups-chat-mention 同款）。
++ *
++ * Run:
++ *   npx vitest run --config vitest.server.config.ts server/src/routes/__tests__/groups-chat-lessons-system.test.ts
++ */
++import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
++import { mkdtempSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++
++// ── mock 重依赖（模块级，import 路由前生效）────────────────────────────────
++
++const teamShape = {
++  name: '双人组',
++  members: ['pm', 'arch'] as string[],
++  edges: [{ from: 'pm', to: 'arch', kind: 'sequential' as const }],
++  policy_matrix: {},
++};
++vi.mock('../../lib/team-source', () => ({
++  loadTeamForRun: vi.fn(() => ({ team: teamShape, errors: [] })),
++}));
++
++const agentRecords: Record<string, { agent_id: string; name: string; soul: string }> = {
++  pm: { agent_id: 'pm', name: '总经理', soul: 'soul-pm' },
++  arch: { agent_id: 'arch', name: '架构汪', soul: 'soul-arch' },
++};
++
++const groupRecord = {
++  group_id: 'g1',
++  agent_ids: ['pm'] as string[],
++  messages: [
++    { content: '帮我复盘下昨天的投放', sender_kind: 'user', sender_name: 'boss', timestamp: '2026-11-07T00:00:00Z' },
++  ] as Array<{ content: string; sender_kind: string; sender_name: string; timestamp: string }>,
++  kind: 'dm' as string,
++  team_id: null as string | null,
++};
++const postedMessages: Array<{ content: string; sender_name: string; sender_kind: string; agent_id?: string }> = [];
++vi.mock('../../storage/groups-backend', () => ({
++  getGroupsBackend: () => ({
++    getGroup: vi.fn(async (id: string) => ({ ...groupRecord, group_id: id })),
++    appendMessage: vi.fn(async (_id: string, body: { content: string; sender_name: string; sender_kind: string; agent_id?: string }) => {
++      postedMessages.push(body);
++      return { ...body, message_id: `m-${postedMessages.length}` };
++    }),
++  }),
++}));
++
++// agent 读取走全局 fetch（pyGet 非群路径）。
++vi.stubGlobal('fetch', vi.fn(async (url: string) => {
++  const m = /\/api\/agents\/([^/]+)$/.exec(String(url));
++  if (m) {
++    const a = agentRecords[decodeURIComponent(m[1])];
++    if (a) {
++      return new Response(JSON.stringify({ data: a }), {
++        status: 200,
++        headers: { 'Content-Type': 'application/json' },
++      });
++    }
++  }
++  return new Response('{}', { status: 404 });
++}));
++vi.mock('../../python-backend', () => ({ PYTHON_BACKEND_URL: 'http://127.0.0.1:1' }));
++
++// dispatcher：可观测 fake，捕获 system/prompt 原样。
++const turnCalls: Array<{ system: string; prompt: string }> = [];
++vi.mock('../../transport/dispatcher', () => ({
++  resolveCallable: () => ({
++    turn: async function* (args: { system: string; prompt: string }) {
++      turnCalls.push({ system: args.system, prompt: args.prompt });
++      yield { type: 'text-delta', value: 'ok' };
++    },
++  }),
++}));
++
++// gateway run：内存 gw。
++vi.mock('../../lib/gateway-run', () => ({
++  startGatewayRun: vi.fn(() => {
++    let n = 0;
++    return {
++      sessionId: 'gw-s1',
++      conversationId: 'c1',
++      turnId: 'turn-1',
++      nextId: () => `gw-${++n}`,
++      emitMessage: vi.fn(),
++      emitPatch: vi.fn(),
++      finish: vi.fn(),
++    };
++  }),
++}));
++
++// worktree：非 git 环境短路。
++vi.mock('../../lib/worktree-manager', () => ({
++  isGitWorkable: vi.fn(async () => false),
++  prepareWorktree: vi.fn(async () => null),
++  integrateAll: vi.fn(async () => []),
++  commitWorktree: vi.fn(async () => null),
++}));
++
++import { runFanoutAsync, chatLessonsBlock } from '../groups-chat';
++
++let tmp: string;
++let origCwd: string;
++// eslint-disable-next-line @typescript-eslint/consistent-type-imports
++let lessons: typeof import('../../storage/memory-lessons');
++
++beforeAll(async () => {
++  origCwd = process.cwd();
++  tmp = mkdtempSync(path.join(tmpdir(), 'sf-chat-lessons-'));
++  process.chdir(tmp);
++  const sqlite = await import('../../storage/sqlite');
++  sqlite._resetForTests();
++  sqlite.getDb();
++  lessons = await import('../../storage/memory-lessons');
++
++  // 四条经验：通用 / pm 专属 / 聊天回合沉淀 / 无关域（绝不该进任何 agent 的块）
++  lessons.remember({ content: '通用-交付必须附证据链', scope_key: '', kind: 'lesson', score: 0.9 });
++  lessons.remember({ content: '专属-总经理汇报先说结论', scope_key: 'pm', kind: 'preference', score: 0.8 });
++  lessons.remember({ content: '聊天教训-复盘别超范围', scope_key: 'chat-gateway', kind: 'lesson', score: 0.85 });
++  lessons.remember({ content: '无关-写手域经验', scope_key: 'writer', kind: 'lesson', score: 0.99 });
++});
++
++afterAll(() => {
++  process.chdir(origCwd);
++  try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }
++});
++
++beforeEach(() => {
++  turnCalls.length = 0;
++  postedMessages.length = 0;
++  // 还原群形态（各用例按需改）
++  groupRecord.kind = 'dm';
++  groupRecord.team_id = null;
++  groupRecord.agent_ids = ['pm'];
++});
++
++describe('chatLessonsBlock — 召回域合并', () => {
++  it('agent 专属 + 聊天域 + 通用都在，无关域不进，通用去重', () => {
++    const block = chatLessonsBlock('pm');
++    expect(block).toContain('## 过往经验（自动沉淀，供参考）');
++    expect(block).toContain('通用-交付必须附证据链');
++    expect(block).toContain('专属-总经理汇报先说结论');
++    expect(block).toContain('聊天教训-复盘别超范围');
++    expect(block).not.toContain('无关-写手域经验');
++    expect(block.split('通用-交付必须附证据链').length - 1).toBe(1);
++  });
++
++  it('无专属沉淀的 agent → 通用 + 聊天域（专属不串给别的 agent）', () => {
++    const block = chatLessonsBlock('arch');
++    expect(block).toContain('通用-交付必须附证据链');
++    expect(block).toContain('聊天教训-复盘别超范围');
++    expect(block).not.toContain('专属-总经理汇报先说结论');
++  });
++});
++
++describe('串行路径（DM）— system = soul + 经验块', () => {
++  it('DM 单 agent：turn 的 system 含 soul 与三类经验', async () => {
++    await runFanoutAsync('g1', 'cli:claude', undefined, {}, '帮我复盘下昨天的投放');
++    expect(turnCalls).toHaveLength(1);
++    const sys = turnCalls[0].system;
++    expect(sys.startsWith('soul-pm')).toBe(true);
++    expect(sys).toContain('## 过往经验（自动沉淀，供参考）');
++    expect(sys).toContain('通用-交付必须附证据链');
++    expect(sys).toContain('专属-总经理汇报先说结论');
++    expect(sys).toContain('聊天教训-复盘别超范围');
++    expect(sys).not.toContain('无关-写手域经验');
++    // prompt 仍是用户原文（经验挂 system，不污染用户消息）
++    expect(turnCalls[0].prompt).toBe('帮我复盘下昨天的投放');
++  });
++});
++
++describe('DAG 路径（team 群）— callAgent 同款注入', () => {
++  it('各 agent 的 system = 各自 soul + 自己域的经验块', async () => {
++    groupRecord.kind = 'group';
++    groupRecord.team_id = 't1';
++    groupRecord.agent_ids = ['pm', 'arch'];
++    await runFanoutAsync('g1', 'cli:claude', undefined, {}, '一起复盘昨天的投放');
++    expect(turnCalls).toHaveLength(2);
++    const pmSys = turnCalls.find((c) => c.system.startsWith('soul-pm'))!.system;
++    const archSys = turnCalls.find((c) => c.system.startsWith('soul-arch'))!.system;
++    expect(pmSys).toContain('专属-总经理汇报先说结论');
++    expect(pmSys).toContain('聊天教训-复盘别超范围');
++    // arch 无专属沉淀：不串 pm 的专属，但通用/聊天域照带
++    expect(archSys).not.toContain('专属-总经理汇报先说结论');
++    expect(archSys).toContain('通用-交付必须附证据链');
++    expect(archSys).toContain('聊天教训-复盘别超范围');
++  });
++});
+diff --git a/server/src/routes/__tests__/groups-chat-mention.test.ts b/server/src/routes/__tests__/groups-chat-mention.test.ts
+index 09bfa87..9dc47b5 100644
+--- a/server/src/routes/__tests__/groups-chat-mention.test.ts
++++ b/server/src/routes/__tests__/groups-chat-mention.test.ts
+@@ -79,9 +79,10 @@ const turnPrompts: Array<{ agentId: string; prompt: string }> = [];
+ vi.mock('../../transport/dispatcher', () => ({
+   resolveCallable: (_executor: string) => ({
+     turn: async function* (args: { system: string; prompt: string }) {
+-      // soul 形如 soul-<id> → 反查 agentId（测试观测用）。
++      // soul 形如 soul-<id> → 反查 agentId（测试观测用）。前缀匹配：2026-11-07
++      // 起 system = soul + 过经验块（chatLessonsBlock），不能再整串精确相等。
+       const agentId = Object.entries(agentRecords).find(
+-        ([, a]) => a.soul === args.system,
++        ([, a]) => a.soul && args.system.startsWith(a.soul),
+       )?.[0] ?? 'unknown';
+       turnPrompts.push({ agentId, prompt: args.prompt });
+       yield { type: 'text-delta', value: `${agentId} 收到` };
+diff --git a/server/src/routes/groups-chat.ts b/server/src/routes/groups-chat.ts
+index 8ed0e95..f78341a 100644
+--- a/server/src/routes/groups-chat.ts
++++ b/server/src/routes/groups-chat.ts
+@@ -58,6 +58,7 @@ import { createHopBroadcaster } from '../lib/chat-dag/hop-broadcast';
+ import { decomposeWithLlm, type ParsedTask } from '../lib/orchestrator-parse';
+ // 对话框知识库（2026-11-06）— 记忆库检索块（fail-soft），DAG/串行派发共用。
+ import { coercePackIds, knowledgeBlock } from '../lib/memory-bank';
++import { promptBlock } from '../storage/memory-lessons';
+ import {
+   commitWorktree,
+   integrateAll,
+@@ -147,6 +148,25 @@ export function tryResolveApprovalFromText(groupId: string, text: string): boole
+   return true;
+ }
+ 
++// ── 2026-11-07 记忆闭环 — 聊天 agent 提示词注入经验记忆（recall）──────────────
++// 走查发现：memory_lessons 写入侧（chat 回合失败/中断 → recordRunLesson，域
++// 'chat-gateway'）早已接通，但聊天两条派发路径的 system 只有 soul，沉淀的经验
++// 永远读不回来（recallTopK 在聊天面从未生效）。这里补上召回闭环。
++
++/** 聊天回合沉淀的固定域（run-sessions registerGatewayRun 的 skill_name 同值）。 */
++export const CHAT_LESSON_SCOPE = 'chat-gateway';
++
++/**
++ * 聊天轮经验块（挂 system，soul 之后）。召回域合并去重：
++ *   - agent 专属（手记/按 bot 沉淀，scope_key=agentId）
++ *   - CHAT_LESSON_SCOPE（聊天回合失败/中断自动沉淀）
++ *   - 通用（域空，天然双域命中，按 id 去重）
++ * 开关 memory.autoLearn（关=不召回）、条数 memory.recallTopK；空块返回 ''。
++ */
++export function chatLessonsBlock(agentId: string): string {
++  return promptBlock([agentId, CHAT_LESSON_SCOPE], '');
++}
++
+ // ── 2026-11-05 GrokBot「记忆交接」— 会话回合跑完自动沉淀交接包 ─────────────────
+ // 对齐 GrokBot 的记忆交接体验：多 agent 一轮协作结束后，把本轮结论沉淀为
+ // memory_handoffs 交接包（最后发言的 agent → 下一个执行者/群成员首位），下游
+@@ -1165,7 +1185,8 @@ async function runFanout(
+             try {
+               const callable = resolveCallable(executor, { apiKey, model, workspace: wt?.dir ?? workspace });
+               for await (const chunk of callable.turn({
+-                system: soul,
++                // 2026-11-07 记忆闭环 — soul 后附该 agent 可召回的过往经验。
++                system: soul + chatLessonsBlock(agentId),
+                 prompt: basePrompt + kbText + upstreamText,
+                 history: history0.slice(0, -1),
+                 signal,
+@@ -1408,7 +1429,8 @@ async function runFanout(
+       try {
+         const callable = resolveCallable(executor, { apiKey, model, workspace: wt?.dir ?? workspace });
+         for await (const chunk of callable.turn({
+-          system: soul,
++          // 2026-11-07 记忆闭环 — soul 后附该 agent 可召回的过往经验（DM 同款）。
++          system: soul + chatLessonsBlock(agentId),
+           prompt: prompt + kbText,
+           history: history.slice(0, -1), // exclude the just-read latest user (it's the prompt)
+           signal: ctrl.signal,
+diff --git a/server/src/routes/run-sessions.ts b/server/src/routes/run-sessions.ts
+index 677ef25..64b6d1b 100644
+--- a/server/src/routes/run-sessions.ts
++++ b/server/src/routes/run-sessions.ts
+@@ -37,7 +37,7 @@ import { saveRun, saveRunArtifacts, type ArtifactType } from '../storage/runs';
+ import { getSetting } from '../storage/settings';
+ // 经验记忆自动沉淀（2026-11-05，整合 OPC-OS PR#3 memory.py 设计）：
+ // run 失败→教训、用户中断→偏好，全部从已落库事实挖、零 LLM 调用。
+-import { remember, contextBlock } from '../storage/memory-lessons';
++import { remember, promptBlock } from '../storage/memory-lessons';
+ import { coercePackIds, knowledgeBlock } from '../lib/memory-bank';
+ import { SKILLS } from '../skills';
+ import { DESIGN_SYSTEMS } from '../design-systems';
+@@ -813,17 +813,10 @@ const VALID_ARTIFACT_TYPES: ReadonlyArray<ArtifactType> = ['yaml', 'html', 'mark
+ /**
+  * 经验记忆召回块（run 提示词注入用）。按 skill_name 分域，空块返回 ''。
+  * 开关：settings.memory.autoLearn（默认开）；settings.memory.recallTopK（默认 4）。
++ * 2026-11-07 — 开关/条数/格式统一走 storage/memory-lessons.promptBlock。
+  */
+ function lessonsBlockForSession(skillName: string): string {
+-  try {
+-    if (getSetting('memory.autoLearn') === false) return '';
+-    const topK = getSetting('memory.recallTopK');
+-    const k = typeof topK === 'number' && topK > 0 ? Math.min(Math.round(topK), 12) : 4;
+-    const block = contextBlock(skillName ?? '', '', k);
+-    return block ? `\n\n## 过往经验（自动沉淀，供参考）\n\n${block}` : '';
+-  } catch {
+-    return '';
+-  }
++  return promptBlock(skillName ?? '', '');
+ }
+ 
+ /** skill 层内容 + 经验块拼接（两者都可能为空）。 */
+diff --git a/server/src/storage/memory-lessons.ts b/server/src/storage/memory-lessons.ts
+index 041a08d..c4a4f76 100644
+--- a/server/src/storage/memory-lessons.ts
++++ b/server/src/storage/memory-lessons.ts
+@@ -26,6 +26,7 @@
+ 
+ import { randomUUID } from 'crypto';
+ import { getDb } from './sqlite';
++import { getSetting } from './settings';
+ 
+ // 一次最多带几条记忆进提示词
+ export const RECALL_TOP_K = 4;
+@@ -203,11 +204,51 @@ function inScope(row: MemoryLesson, scope_key: string, task_type: string): boole
+ 
+ /** 进提示词的那段话。空字符串表示没有可用记忆（不塞废话）。 */
+ export function contextBlock(scope_key = '', task_type = '', topK = RECALL_TOP_K): string {
+-  const hits = recallLessons(scope_key, task_type, topK);
++  return formatRows(recallLessons(scope_key, task_type, topK));
++}
++
++function formatRows(hits: MemoryLesson[]): string {
+   if (!hits.length) return '';
+   return hits.map((row) => `- [${KIND_LABEL[row.kind] ?? '经验'}] ${row.content}`).join('\n');
+ }
+ 
++/**
++ * 进提示词的经验块（含「## 过往经验」标题；2026-11-07 抽为统一入口）。
++ *
++ * 单域语义与旧内联实现逐字一致：开关 memory.autoLearn（关=不召回）、条数
++ * memory.recallTopK（1..12 缺省 4）、空（无记忆）返回 ''、绝不抛错。
++ * 传数组 = 多域合并召回（去重后整体按 score/hits/updated_at 排序，再截 topK）：
++ * 通用（域空）条目天然重复出现于各域结果，合并时按 id 去重。
++ */
++export function promptBlock(scope: string | string[] = '', task_type = ''): string {
++  try {
++    if (getSetting('memory.autoLearn') === false) return '';
++    const topK = getSetting('memory.recallTopK');
++    const k = typeof topK === 'number' && topK > 0 ? Math.min(Math.round(topK), 12) : RECALL_TOP_K;
++    const scopes = Array.isArray(scope) ? scope : [scope];
++    if (scopes.length === 1) {
++      const block = contextBlock(scopes[0], task_type, k);
++      return block ? `\n\n## 过往经验（自动沉淀，供参考）\n\n${block}` : '';
++    }
++    const seen = new Set<string>();
++    const merged: MemoryLesson[] = [];
++    for (const s of scopes) {
++      for (const row of recallLessons(s, task_type, k)) {
++        if (seen.has(row.id)) continue;
++        seen.add(row.id);
++        merged.push(row);
++      }
++    }
++    merged.sort(
++      (a, b) => b.score - a.score || b.hits - a.hits || b.updated_at - a.updated_at,
++    );
++    const block = formatRows(merged.slice(0, k));
++    return block ? `\n\n## 过往经验（自动沉淀，供参考）\n\n${block}` : '';
++  } catch {
++    return '';
++  }
++}
++
+ // ---------------------------------------------------------------- 管理
+ 
+ export function getLesson(id: string): MemoryLesson | undefined {
+diff --git a/server/src/workflow/executor.ts b/server/src/workflow/executor.ts
+index 4caac8e..b412c64 100644
+--- a/server/src/workflow/executor.ts
++++ b/server/src/workflow/executor.ts
+@@ -58,21 +58,13 @@ import { PermissionPolicyV2 } from '../lib/permission-policy-v2';
+ import { ToolRegistry } from '../lib/tool-spec';
+ import { toolApprovals } from '../lib/tool-approval';
+ import { promptDefaultsForTools } from '../lib/tools/builtin';
+-// 经验记忆召回（2026-11-05，整合 OPC-OS PR#3 memory.py 设计）— 失败静默
+-import { contextBlock } from '../storage/memory-lessons';
+-import { getSetting } from '../storage/settings';
++// 经验记忆召回（2026-11-05，整合 OPC-OS PR#3 memory.py 设计）— 失败静默。
++// 2026-11-07 — 开关/条数/格式统一走 storage/memory-lessons.promptBlock。
++import { promptBlock } from '../storage/memory-lessons';
+ 
+ /** 拼该 agent 域的经验记忆块。空（无记忆/开关关）返回 ''。绝不抛错。 */
+ function lessonsBlockFor(agentId: string): string {
+-  try {
+-    if (getSetting('memory.autoLearn') === false) return '';
+-    const topK = getSetting('memory.recallTopK');
+-    const k = typeof topK === 'number' && topK > 0 ? Math.min(Math.round(topK), 12) : 4;
+-    const block = contextBlock(agentId, '', k);
+-    return block ? `\n\n## 过往经验（自动沉淀，供参考）\n\n${block}` : '';
+-  } catch {
+-    return '';
+-  }
++  return promptBlock(agentId, '');
+ }
+ 
+ // ─── Workspace I/O ───────────────────────────────────────────────────────────

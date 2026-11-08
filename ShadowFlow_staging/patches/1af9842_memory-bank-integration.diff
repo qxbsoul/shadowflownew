@@ -1,0 +1,711 @@
+diff --git a/server/src/__tests__/memory-bank.test.ts b/server/src/__tests__/memory-bank.test.ts
+new file mode 100644
+index 0000000..a75b958
+--- /dev/null
++++ b/server/src/__tests__/memory-bank.test.ts
+@@ -0,0 +1,167 @@
++/**
++ * memory-bank.test.ts — 记忆库检索辅助模块契约（对话框知识库接线）。
++ *
++ * stubGlobal fetch 测：
++ *   - coercePackIds：清洗 / 去重 / 上限 8 / 非法项丢弃
++ *   - fetchMemoryBankHits：多包聚合、score 降序、单包失败跳过、坏命中清洗
++ *   - renderKnowledgeBlock：来源标注、单条截断、整块截断、零命中 ''
++ *   - knowledgeBlock：fail-soft（全挂返回 ''，绝不抛）
++ */
++import { describe, it, expect, vi, afterEach } from 'vitest';
++import {
++  coercePackIds,
++  fetchMemoryBankHits,
++  renderKnowledgeBlock,
++  knowledgeBlock,
++} from '../lib/memory-bank';
++
++afterEach(() => {
++  vi.unstubAllGlobals();
++  vi.restoreAllMocks();
++});
++
++function okJson(body: unknown) {
++  return { ok: true, status: 200, json: async () => body } as Response;
++}
++
++describe('coercePackIds', () => {
++  it('returns [] for non-array input', () => {
++    expect(coercePackIds(undefined)).toEqual([]);
++    expect(coercePackIds(null)).toEqual([]);
++    expect(coercePackIds('p1')).toEqual([]);
++    expect(coercePackIds({ 0: 'p1' })).toEqual([]);
++  });
++
++  it('trims, drops non-strings/empty/oversized, dedupes', () => {
++    expect(
++      coercePackIds([' p1 ', 'p1', '', '   ', 42, null, { x: 1 }, 'p2', 'x'.repeat(201)]),
++    ).toEqual(['p1', 'p2']);
++  });
++
++  it('caps at 8 ids', () => {
++    const ids = Array.from({ length: 12 }, (_, i) => `p${i}`);
++    expect(coercePackIds(ids)).toEqual(ids.slice(0, 8));
++  });
++});
++
++describe('fetchMemoryBankHits', () => {
++  it('returns [] without packs or with blank query', async () => {
++    const fetchMock = vi.fn();
++    vi.stubGlobal('fetch', fetchMock);
++    expect(await fetchMemoryBankHits([], 'q')).toEqual([]);
++    expect(await fetchMemoryBankHits(['p1'], '   ')).toEqual([]);
++    expect(fetchMock).not.toHaveBeenCalled();
++  });
++
++  it('queries each pack with top_k=4 and aggregates hits by score desc', async () => {
++    const fetchMock = vi.fn(async (url: unknown, init?: { body?: unknown }) => {
++      const u = String(url);
++      if (u.includes('/packs/p1/query')) {
++        return okJson({
++          data: { hits: [{ text: '低分命中', source: 'a.md', score: 0.3 }] },
++        });
++      }
++      return okJson({
++        data: { hits: [{ text: '高分命中', source: 'b.md', score: 0.9 }] },
++      });
++    });
++    vi.stubGlobal('fetch', fetchMock);
++
++    const hits = await fetchMemoryBankHits(['p1', 'p2'], '氢能');
++    expect(hits.map((h) => h.text)).toEqual(['高分命中', '低分命中']);
++    expect(fetchMock).toHaveBeenCalledTimes(2);
++    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
++    expect(body).toEqual({ query: '氢能', top_k: 4 });
++  });
++
++  it('skips failing pack but keeps others (fail-soft)', async () => {
++    const fetchMock = vi.fn(async (url: unknown) => {
++      const u = String(url);
++      if (u.includes('/packs/bad/query')) return { ok: false, status: 500, json: async () => ({}) } as Response;
++      if (u.includes('/packs/boom/query')) throw new Error('ECONNREFUSED');
++      return okJson({ data: { hits: [{ text: '幸存命中', source: 's', score: 1 }] } });
++    });
++    vi.stubGlobal('fetch', fetchMock);
++
++    const hits = await fetchMemoryBankHits(['bad', 'boom', 'good'], 'q');
++    expect(hits).toEqual([{ text: '幸存命中', source: 's', score: 1 }]);
++  });
++
++  it('cleans malformed hits: drops empty text, falls back source to packId', async () => {
++    vi.stubGlobal(
++      'fetch',
++      vi.fn(async () =>
++        okJson({
++          data: {
++            hits: [
++              { text: '   ', source: 's', score: 1 },
++              { source: 'only-source.md', score: 1 },
++              { text: 42, source: 's', score: 1 },
++              { text: ' 有效 ', source: '', score: 'NaN-ish' },
++            ],
++          },
++        }),
++      ),
++    );
++
++    const hits = await fetchMemoryBankHits(['pk'], 'q');
++    expect(hits).toEqual([{ text: '有效', source: 'pk', score: 0 }]);
++  });
++});
++
++describe('renderKnowledgeBlock', () => {
++  it("returns '' for zero hits", () => {
++    expect(renderKnowledgeBlock([])).toBe('');
++  });
++
++  it('renders header with source annotation per hit', () => {
++    const block = renderKnowledgeBlock([
++      { text: '片段一', source: 'a.md', score: 1 },
++      { text: '片段二', source: 'b.md', score: 0.5 },
++    ]);
++    expect(block).toContain('## 知识库参考');
++    expect(block).toContain('- （来源：a.md）片段一');
++    expect(block).toContain('- （来源：b.md）片段二');
++  });
++
++  it('truncates single hit text at 400 chars', () => {
++    const block = renderKnowledgeBlock([{ text: 'x'.repeat(500), source: 's', score: 1 }]);
++    expect(block).toContain(`${'x'.repeat(400)}…`);
++    expect(block).not.toContain('x'.repeat(401) + 'x'.repeat(100));
++  });
++
++  it('caps whole block at 4000 chars with truncation marker', () => {
++    const hits = Array.from({ length: 20 }, (_, i) => ({
++      text: `段落${i}：${'文'.repeat(380)}`,
++      source: `s${i}.md`,
++      score: 1 - i * 0.01,
++    }));
++    const block = renderKnowledgeBlock(hits);
++    expect(block.length).toBeLessThanOrEqual(4000 + '\n…（已截断）'.length);
++    expect(block.endsWith('…（已截断）')).toBe(true);
++  });
++});
++
++describe('knowledgeBlock', () => {
++  it('returns rendered block on happy path', async () => {
++    vi.stubGlobal(
++      'fetch',
++      vi.fn(async () => okJson({ data: { hits: [{ text: '知识', source: 'k', score: 1 }] } })),
++    );
++    const block = await knowledgeBlock(['p1'], '问题');
++    expect(block).toContain('## 知识库参考');
++    expect(block).toContain('（来源：k）知识');
++  });
++
++  it('fails soft to empty string when fetch blows up', async () => {
++    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('ECONNREFUSED'); }));
++    await expect(knowledgeBlock(['p1'], 'q')).resolves.toBe('');
++  });
++
++  it('returns empty string for undefined packIds', async () => {
++    const fetchMock = vi.fn();
++    vi.stubGlobal('fetch', fetchMock);
++    await expect(knowledgeBlock(undefined, 'q')).resolves.toBe('');
++    expect(fetchMock).not.toHaveBeenCalled();
++  });
++});
+diff --git a/server/src/lib/memory-bank.ts b/server/src/lib/memory-bank.ts
+new file mode 100644
+index 0000000..b766f91
+--- /dev/null
++++ b/server/src/lib/memory-bank.ts
+@@ -0,0 +1,119 @@
++/**
++ * memory-bank.ts — 多模态记忆库检索辅助（对话框知识库接线，2026-11-06）。
++ *
++ * run-sessions / groups-chat 组装提示词前调用 knowledgeBlock()：按用户消息
++ * 去 Python `/api/memory-bank/packs/{id}/query` 检索命中，渲染成「知识库参考」
++ * 文本块，与经验记忆块并列注入 skill 层尾部，让 Agent 回答真正引用知识库内容。
++ *
++ * fail-soft 契约（与经验记忆块一致）：Python 未起 / 超时 / 单包失败 → 跳过该包；
++ * 全军覆没或零命中 → 返回 ''，绝不阻塞 run。
++ */
++import { PYTHON_BACKEND_URL } from '../python-backend';
++
++export interface MemoryBankHitLite {
++  text: string;
++  source: string;
++  score: number;
++}
++
++/** 每包命中条数（对话场景 4 条够用，控上下文长度）。 */
++const TOP_K = 4;
++/** 单包检索超时（毫秒）。记忆库是 sidecar，挂了不该拖死 run 启动。 */
++const TIMEOUT_MS = 4000;
++/** pack id 数量上限（防御：别让一个 payload 拖一串请求）。 */
++const MAX_PACKS = 8;
++/** 单条命中文本截断（字符）。 */
++const HIT_TEXT_CAP = 400;
++/** 整块渲染上限（字符），超限丢尾部命中。 */
++const BLOCK_CAP = 4000;
++
++/** 请求体/会话字段里的 pack id 数组 → 干净的 id 列表（非法项丢弃）。 */
++export function coercePackIds(raw: unknown): string[] {
++  if (!Array.isArray(raw)) return [];
++  const out: string[] = [];
++  for (const item of raw) {
++    if (typeof item !== 'string') continue;
++    const id = item.trim();
++    if (!id || id.length > 200) continue;
++    if (!out.includes(id)) out.push(id);
++    if (out.length >= MAX_PACKS) break;
++  }
++  return out;
++}
++
++/**
++ * 对每个 pack 发一次 top_k 检索，聚平命中（按 score 降序）。
++ * 单包失败只跳过该包；查询串空 / 无 pack → 直接 []。
++ */
++export async function fetchMemoryBankHits(
++  packIds: string[],
++  query: string,
++): Promise<MemoryBankHitLite[]> {
++  const q = query.trim();
++  if (!q || packIds.length === 0) return [];
++  const hits: MemoryBankHitLite[] = [];
++  await Promise.all(
++    packIds.map(async (packId) => {
++      try {
++        const controller = new AbortController();
++        const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
++        const res = await fetch(
++          `${PYTHON_BACKEND_URL}/api/memory-bank/packs/${encodeURIComponent(packId)}/query`,
++          {
++            method: 'POST',
++            headers: { 'Content-Type': 'application/json' },
++            body: JSON.stringify({ query: q, top_k: TOP_K }),
++            signal: controller.signal,
++          },
++        );
++        clearTimeout(timer);
++        if (!res.ok) return;
++        const body = (await res.json()) as {
++          data?: { hits?: Array<{ text?: unknown; source?: unknown; score?: unknown }> };
++        };
++        for (const h of body.data?.hits ?? []) {
++          if (typeof h.text !== 'string' || !h.text.trim()) continue;
++          hits.push({
++            text: h.text.trim(),
++            source: typeof h.source === 'string' && h.source ? h.source : packId,
++            score: typeof h.score === 'number' ? h.score : 0,
++          });
++        }
++      } catch {
++        /* fail-soft：单包超时/网络错不阻塞整体 */
++      }
++    }),
++  );
++  hits.sort((a, b) => b.score - a.score);
++  return hits;
++}
++
++/** 命中列表 → 「知识库参考」块；零命中返回 ''。 */
++export function renderKnowledgeBlock(hits: MemoryBankHitLite[]): string {
++  if (hits.length === 0) return '';
++  const lines: string[] = [
++    '## 知识库参考（记忆库检索命中，回答时优先引用；引用时注明「来源」）',
++    '',
++  ];
++  for (const h of hits) {
++    const text =
++      h.text.length > HIT_TEXT_CAP ? `${h.text.slice(0, HIT_TEXT_CAP)}…` : h.text;
++    lines.push(`- （来源：${h.source}）${text}`);
++  }
++  let block = lines.join('\n');
++  if (block.length > BLOCK_CAP) block = `${block.slice(0, BLOCK_CAP)}\n…（已截断）`;
++  return block;
++}
++
++/** 检索 + 渲染一把梭（fail-soft，异常返回 ''）。 */
++export async function knowledgeBlock(
++  packIds: string[] | undefined,
++  query: string,
++): Promise<string> {
++  try {
++    const hits = await fetchMemoryBankHits(packIds ?? [], query);
++    return renderKnowledgeBlock(hits);
++  } catch {
++    return '';
++  }
++}
+diff --git a/server/src/routes/groups-chat.ts b/server/src/routes/groups-chat.ts
+index e9bb81e..ed5e064 100644
+--- a/server/src/routes/groups-chat.ts
++++ b/server/src/routes/groups-chat.ts
+@@ -55,6 +55,8 @@ import {
+ } from '../storage/agent-hops';
+ // Polynoia 对标（2026-08-15）— INTENT_PARSE 编排拆解 + worktree 隔离闭环 + git 证据。
+ import { decomposeWithLlm, type ParsedTask } from '../lib/orchestrator-parse';
++// 对话框知识库（2026-11-06）— 记忆库检索块（fail-soft），DAG/串行派发共用。
++import { coercePackIds, knowledgeBlock } from '../lib/memory-bank';
+ import {
+   commitWorktree,
+   integrateAll,
+@@ -762,6 +764,7 @@ async function runFanout(
+   model: string | undefined,
+   headers: Request['headers'],
+   latestUserText?: string,
++  knowledgePackIds?: string[],
+ ): Promise<void> {
+   const apiKey = resolveExecutorKey(executor, headers);
+ 
+@@ -819,6 +822,15 @@ async function runFanout(
+   // startGatewayRun 失败返回 null（聊天主链路照常），所有 gw 操作 `gw?.` 防御。
+   const gw = startGatewayRun(groupId, userText);
+ 
++  // 知识库参考（2026-11-06 对话框知识库接线）— 本轮用户消息检索记忆库命中
++  // （fail-soft：Python 未起/超时/零命中 → 空串）；DAG/串行两条派发路径共用。
++  const kbText = await knowledgeBlock(knowledgePackIds, userText);
++  if (kbText) {
++    console.log(
++      `[groups-chat] injecting knowledge_block (chars=${kbText.length}, packs=${knowledgePackIds?.length ?? 0})`,
++    );
++  }
++
+   try {
+     // 2026-06-03 Phase 2a — group 绑了 team 且能读到单一真源 DAG → 按拓扑调度多 agent。
+     // 读不到 team(无 team_id / 文件缺失 / 无成员)→ 落到下面的串行 fan-out 降级。
+@@ -1104,7 +1116,7 @@ async function runFanout(
+               const callable = resolveCallable(executor, { apiKey, model, workspace: wt?.dir ?? workspace });
+               for await (const chunk of callable.turn({
+                 system: soul,
+-                prompt: basePrompt + upstreamText,
++                prompt: basePrompt + kbText + upstreamText,
+                 history: history0.slice(0, -1),
+                 signal,
+                 model,
+@@ -1352,7 +1364,7 @@ async function runFanout(
+         const callable = resolveCallable(executor, { apiKey, model, workspace: wt?.dir ?? workspace });
+         for await (const chunk of callable.turn({
+           system: soul,
+-          prompt,
++          prompt: prompt + kbText,
+           history: history.slice(0, -1), // exclude the just-read latest user (it's the prompt)
+           signal: ctrl.signal,
+           model,
+@@ -1609,6 +1621,7 @@ router.post('/:id/messages', (req: Request, res: Response) => {
+       sender_kind?: string;
+       executor?: string;
+       model?: string;
++      knowledge_pack_ids?: unknown;
+     };
+     const senderKind = body.sender_kind ?? 'user';
+     const content = typeof body.content === 'string' ? body.content : '';
+@@ -1659,7 +1672,15 @@ router.post('/:id/messages', (req: Request, res: Response) => {
+     // 先把决定送达（不改聊天主链路：消息照常持久化； fan-out 照常，若用户
+     // 批/拒后还想派新活，这条消息本身就是新一轮）。
+     tryResolveApprovalFromText(groupId, content);
+-    void runFanout(groupId, executor, model, req.headers, content).catch((e) => {
++    // 对话框知识库（2026-11-06）— 记忆库 pack id 透传给 fan-out（每轮检索注入）。
++    void runFanout(
++      groupId,
++      executor,
++      model,
++      req.headers,
++      content,
++      coercePackIds(body.knowledge_pack_ids),
++    ).catch((e) => {
+       // eslint-disable-next-line no-console
+       console.warn('[groups-chat] fanout failed:', e);
+     });
+diff --git a/server/src/routes/run-sessions.ts b/server/src/routes/run-sessions.ts
+index a6e8fba..677ef25 100644
+--- a/server/src/routes/run-sessions.ts
++++ b/server/src/routes/run-sessions.ts
+@@ -38,6 +38,7 @@ import { getSetting } from '../storage/settings';
+ // 经验记忆自动沉淀（2026-11-05，整合 OPC-OS PR#3 memory.py 设计）：
+ // run 失败→教训、用户中断→偏好，全部从已落库事实挖、零 LLM 调用。
+ import { remember, contextBlock } from '../storage/memory-lessons';
++import { coercePackIds, knowledgeBlock } from '../lib/memory-bank';
+ import { SKILLS } from '../skills';
+ import { DESIGN_SYSTEMS } from '../design-systems';
+ import { composeSystemPrompt, type LayerToggles } from '../prompt-assembly';
+@@ -335,6 +336,12 @@ interface SessionRecord {
+   /** Story 15.12 interface — pre-rendered side-files block; loader to be wired by 15.12. */
+   side_files?: string;
+   layer_toggles?: LayerToggles;
++  /**
++   * 2026-11-06 — 对话框知识库接线：多模态记忆库 pack id 列表（用户在 composer
++   * KNOWLEDGE chip 勾选）。stream 组装提示词时按 goal 检索命中注入「知识库参考」
++   * 块（fail-soft）；多轮接力每轮以当轮 goal 重新检索。
++   */
++  knowledge_pack_ids?: string[];
+   /**
+    * Story 15.29 — conversation this run belongs to. Always set: when the
+    * client omits `conversation_id` we auto-create an anonymous one under
+@@ -1016,6 +1023,8 @@ router.post('/', (req: Request, res: Response) => {
+     project_meta,
+     side_files,
+     layer_toggles,
++    // 2026-11-06 — 对话框知识库：记忆库 pack id 列表（coercePackIds 清洗）。
++    knowledge_pack_ids,
+     // Story 15.19 v2 — optional executor selector.
+     executor,
+     // Story 15.18 — optional provider selector.
+@@ -1044,6 +1053,7 @@ router.post('/', (req: Request, res: Response) => {
+     project_meta?: unknown;
+     side_files?: unknown;
+     layer_toggles?: unknown;
++    knowledge_pack_ids?: unknown;
+     executor?: unknown;
+     provider?: unknown;
+     cwd?: unknown;
+@@ -1196,6 +1206,8 @@ router.post('/', (req: Request, res: Response) => {
+   const validated_side_files =
+     typeof side_files === 'string' && side_files.trim().length > 0 ? side_files : undefined;
+   const validated_layer_toggles = coerceLayerToggles(layer_toggles);
++  // 对话框知识库（2026-11-06）— 记忆库 pack id 列表；非法项丢弃，空 = 不挂知识。
++  const validated_knowledge_pack_ids = coercePackIds(knowledge_pack_ids);
+ 
+   // Story 15.19 v2 — coerce executor. We accept any non-empty string and let
+   // the dispatcher emit structured errors for unknown values; this keeps the
+@@ -1305,6 +1317,8 @@ router.post('/', (req: Request, res: Response) => {
+     project_meta: validated_project_meta ?? null,
+     side_files: validated_side_files,
+     layer_toggles: validated_layer_toggles,
++    knowledge_pack_ids:
++      validated_knowledge_pack_ids.length > 0 ? validated_knowledge_pack_ids : undefined,
+     executor: validated_executor,
+     cwd: validated_cwd,
+     conversation_id: validated_conversation_id,
+@@ -1381,6 +1395,7 @@ router.post('/:id/messages', (req: Request, res: Response) => {
+     anthropic_key?: unknown;
+     executor?: unknown;
+     cwd?: unknown;
++    knowledge_pack_ids?: unknown;
+   };
+   // Accept either `content` (chat-style payload that the RunSessionPage send box
+   // uses) or `goal` (mirrors POST /api/run-sessions). content wins when both
+@@ -1405,6 +1420,11 @@ router.post('/:id/messages', (req: Request, res: Response) => {
+   if (typeof body.cwd === 'string' && /^([a-zA-Z]:[\\/]|[\\/])/.test(body.cwd.trim())) {
+     overrides.cwd = body.cwd.trim();
+   }
++  // 对话框知识库（2026-11-06）— 显式给出数组即整体替换（空数组 = 本轮取消挂载）；
++  // 未给继承 source 会话的选择。
++  if (Array.isArray(body.knowledge_pack_ids)) {
++    overrides.knowledge_pack_ids = coercePackIds(body.knowledge_pack_ids);
++  }
+ 
+   sessionStore.set(new_session_id, {
+     ...source,
+@@ -1813,10 +1833,20 @@ router.get('/:id/stream', async (req: Request, res: Response) => {
+   // 经验记忆（2026-11-05，OPC-OS PR#3 移植）：按 skill_name 分域召回，拼进 skill 层
+   // 尾部（静态段内、技能指令之后），空块自动丢弃不打乱段落顺序。失败静默。
+   const lessonsBlock = lessonsBlockForSession(session.skill_name);
++  // 知识库参考（2026-11-06 对话框知识库接线）：会话挂了记忆库 pack → 按本轮
++  // goal 检索命中注入「知识库参考」块（fail-soft：Python 未起/超时 → 空块）。
++  // 多轮接力每轮以当轮 goal 重新检索，与经验块并列拼进 skill 层尾部。
++  const knowledgeBlockText = await knowledgeBlock(session.knowledge_pack_ids, session.goal);
++  if (knowledgeBlockText) {
++    console.log(
++      `[run-sessions] injecting knowledge_block (chars=${knowledgeBlockText.length}, packs=${session.knowledge_pack_ids?.length ?? 0})`,
++    );
++  }
++  const dynamicContextBlock = lessonsBlock + (knowledgeBlockText ? `\n\n${knowledgeBlockText}` : '');
+   const compose = wantPlainConversation
+     ? composeSystemPrompt({
+         ds_injection: ds?.injection_prompt,
+-        skill_system_prompt: joinLessons(CONVERSATIONAL_AGENT_PROMPT, lessonsBlock),
++        skill_system_prompt: joinLessons(CONVERSATIONAL_AGENT_PROMPT, dynamicContextBlock),
+         skill_mode: undefined,
+         project_meta: session.project_meta ?? null,
+         conversation_history: conversationHistoryBlock,
+@@ -1825,7 +1855,7 @@ router.get('/:id/stream', async (req: Request, res: Response) => {
+       })
+     : composeSystemPrompt({
+         ds_injection: ds?.injection_prompt,
+-        skill_system_prompt: joinLessons(skillForPrompt?.system_prompt, lessonsBlock),
++        skill_system_prompt: joinLessons(skillForPrompt?.system_prompt, dynamicContextBlock),
+         skill_mode: skillForPrompt?.mode,
+         project_meta: session.project_meta ?? null,
+         conversation_history: conversationHistoryBlock,
+diff --git a/shadowflow/api/__tests__/test_secretary_seed.py b/shadowflow/api/__tests__/test_secretary_seed.py
+index 02167ba..26787da 100644
+--- a/shadowflow/api/__tests__/test_secretary_seed.py
++++ b/shadowflow/api/__tests__/test_secretary_seed.py
+@@ -1,9 +1,9 @@
+-"""内置秘书「影」播种测试（2026-11-06）。
++"""内置秘书播种测试（2026-11-06；显示名两次更名后定稿「总经理」、欢迎语改常规文案）。
+ 
+ 覆盖：
+   - ensure_secretary 幂等：首次播种成功、二次调用返回 None 不覆盖
+   - server startup hook 调用（monkeypatch _AGENTS_DIR 隔离）
+-  - DM resolve 对影的新会话预置「Hello World!」问候（仅新建；老会话/普通
++  - DM resolve 对秘书的新会话预置欢迎语问候（仅新建；老会话/普通
+     agent 零变化）
+ """
+ 
+@@ -35,15 +35,16 @@ def client(tmp_path, monkeypatch):
+ 
+ class TestSecretarySeed:
+     def test_seeds_agent_record(self, client):
+-        """首次播种：agent-shadow-secretary 记录落盘，name=影，source=secretary。"""
++        """首次播种：agent-shadow-secretary 记录落盘，name=总经理，source=secretary。"""
+         r = client.get("/api/agents")
+         assert r.status_code == 200
+         agents = r.json()["data"]
+         rec = next((a for a in agents if a["agent_id"] == "agent-shadow-secretary"), None)
+         assert rec is not None
+-        assert rec["name"] == "影"
++        assert rec["name"] == "总经理"
+         assert rec["source"] == "secretary"
+-        assert rec["avatar_seed"] == "shadow-secretary"
++        assert rec["avatar_style"] == "lorelei"
++        assert rec["avatar_seed"] == "mishu"
+ 
+     def test_seed_is_idempotent(self, client):
+         """二次启动不覆盖：用户改名后重启，名字保持用户版本。"""
+@@ -62,14 +63,15 @@ class TestSecretarySeed:
+         assert r2.json()["data"]["name"] == "我的秘书"
+ 
+     def test_dm_resolve_presets_greeting_for_new_conversation(self, client):
+-        """影的新 DM 预置 Hello World!（sender=影）。"""
++        """秘书的新 DM 预置欢迎语（sender=总经理）。"""
+         r = client.post("/api/chat/dm/agent-shadow-secretary/resolve")
+         assert r.status_code == 200
+         gid = r.json()["group_id"]
+         assert r.json()["created"] is True
+         msgs = client.get(f"/api/groups/{gid}/messages").json()["messages"]
+         assert len(msgs) == 1
+-        assert msgs[0]["content"] == "Hello World!"
++        assert msgs[0]["content"] == seed_mod.SECRETARY_GREETING
++        assert msgs[0]["sender_name"] == "总经理"
+         assert msgs[0]["sender_kind"] == "agent"
+         assert msgs[0]["agent_id"] == "agent-shadow-secretary"
+ 
+@@ -84,12 +86,12 @@ class TestSecretarySeed:
+ 
+     def test_dm_resolve_backfills_greeting_for_legacy_empty_conversation(self, client):
+         """存量老会话（播种功能上线前建、零消息）resolve 时补种问候。"""
+-        # 手工造一条「老」影 DM：kind=dm、零消息——模拟播种功能之前建的会话。
++        # 手工造一条「老」秘书 DM：kind=dm、零消息——模拟播种功能之前建的会话。
+         gid = "legacy0" + "0" * 27
+         groups_mod._save_group(
+             {
+                 "group_id": gid,
+-                "name": "影",
++                "name": "总经理",
+                 "template_id": "",
+                 "group_template_id": "",
+                 "agent_ids": ["agent-shadow-secretary"],
+@@ -107,7 +109,7 @@ class TestSecretarySeed:
+         assert r.json()["created"] is False
+         msgs = client.get(f"/api/groups/{gid}/messages").json()["messages"]
+         assert len(msgs) == 1
+-        assert msgs[0]["content"] == "Hello World!"
++        assert msgs[0]["content"] == seed_mod.SECRETARY_GREETING
+         assert msgs[0]["sender_kind"] == "agent"
+         assert msgs[0]["agent_id"] == "agent-shadow-secretary"
+         # 再次 resolve 幂等：不重复补种
+@@ -120,7 +122,7 @@ class TestSecretarySeed:
+         groups_mod._save_group(
+             {
+                 "group_id": gid,
+-                "name": "影",
++                "name": "总经理",
+                 "template_id": "",
+                 "group_template_id": "",
+                 "agent_ids": ["agent-shadow-secretary"],
+diff --git a/shadowflow/api/groups.py b/shadowflow/api/groups.py
+index ff86a37..d4c2b43 100644
+--- a/shadowflow/api/groups.py
++++ b/shadowflow/api/groups.py
+@@ -331,16 +331,17 @@ async def resolve_dm_conversation(
+     for rec in _list_groups_records(workspace_id, kinds=["dm"]):
+         ids = rec.get("agent_ids") or []
+         if len(ids) == 1 and ids[0] == agent_id:
+-            # 秘书「影」问候幂等补种（2026-11-06）：存量老会话建于播种功能
+-            # 上线之前，命中时零消息 → 补一条 Hello World!（与新建播种同款），
+-            # 保证「点进来就有主控消息」对老会话同样成立；已有消息绝不覆盖。
+-            if agent_id == "agent-shadow-secretary" and not (rec.get("messages") or []):
++            # 秘书问候幂等补种（2026-11-06；同日「Hello World!」改常规欢迎语）：
++            # 存量老会话建于播种功能上线之前，命中时零消息 → 补一条欢迎语
++            # （与新建播种同款），保证「点进来就有主控消息」对老会话同样成立；
++            # 已有消息绝不覆盖。
++            if agent_id == SECRETARY_AGENT_ID and not (rec.get("messages") or []):
+                 rec["messages"] = [
+                     {
+-                        "sender_name": "影",
++                        "sender_name": SECRETARY_NAME,
+                         "sender_kind": "agent",
+                         "agent_id": agent_id,
+-                        "content": "Hello World!",
++                        "content": SECRETARY_GREETING,
+                         "timestamp": datetime.now(timezone.utc).isoformat(),
+                     }
+                 ]
+diff --git a/shadowflow/server.py b/shadowflow/server.py
+index 7619278..0be55eb 100644
+--- a/shadowflow/server.py
++++ b/shadowflow/server.py
+@@ -404,7 +404,7 @@ async def _seed_opc_os() -> None:
+ 
+ @app.on_event("startup")
+ async def _seed_secretary() -> None:
+-    """Seed the built-in secretary agent「影」(2026-11-06, GrokBot 主Bot范式).
++    """Seed the built-in secretary agent「秘书」(2026-11-06, GrokBot 主Bot范式).
+ 
+     幂等：固定 agent_id，已存在（含用户改过）则跳过。失败只告警不阻塞启动。
+     """
+diff --git a/shadowflow/services/secretary_seed.py b/shadowflow/services/secretary_seed.py
+index 7709893..8e95f32 100644
+--- a/shadowflow/services/secretary_seed.py
++++ b/shadowflow/services/secretary_seed.py
+@@ -1,10 +1,10 @@
+-"""内置秘书「影」播种（2026-11-06，GrokBot「主Bot派活」范式）。
++"""内置秘书播种（2026-11-06，GrokBot「主Bot派活」范式；显示名同日定稿「总经理」）。
+ 
+ 产品口径：
+-  - 用户第一次进产品就有一个贴身主控 Agent「影」可对话：接需求 → 拆活 →
++  - 用户第一次进产品就有一个贴身主控 Agent 可对话：接需求 → 拆活 →
+     推荐招募员工/组建团队 → 派活 → 汇报。
+-  - 影的第一句话是「Hello World!」（用户钦定文案），播种时直接写进会话日志，
+-    用户点进来就有一条欢迎消息，而不是空会话。
++  - 它的第一句话是常规欢迎语（SECRETARY_GREETING），播种时直接写进会话
++    日志，用户点进来就有一条欢迎消息，而不是空会话。
+ 
+ 幂等设计：
+   - Agent 以固定 id ``agent-shadow-secretary`` 存于 .shadowflow/agents/，
+@@ -27,15 +27,16 @@ from typing import Any, Dict
+ 
+ logger = logging.getLogger("shadowflow.secretary")
+ 
+-# 固定 id：幂等锚点。alllowlist 正则 ^[a-zA-Z0-9_-]+$ 兼容。
++# 固定 id：幂等锚点（不随改名变动，改 id 会孤儿化存量会话）。
++# alllowlist 正则 ^[a-zA-Z0-9_-]+$ 兼容。
+ SECRETARY_AGENT_ID = "agent-shadow-secretary"
+-SECRETARY_NAME = "影"
+-# 用户钦定的第一句话（秘书发给用户的开场白）。
+-SECRETARY_GREETING = "Hello World!"
++SECRETARY_NAME = "总经理"
++# 发给用户的开场白（2026-11-06：「Hello World!」→ 常规欢迎语）。
++SECRETARY_GREETING = "你好，我是你的总经理，很高兴为你服务。有什么想做的事，尽管吩咐。"
+ 
+ # soul 按 GrokBot「主Bot派活」精神写：接需求 → 拆活 → 招人/组队 → 派活 → 汇报。
+ SECRETARY_SOUL = (
+-    "你是「影」，ShadowFlow 用户的贴身秘书兼首席幕僚。你的职责："
++    "你是「总经理」，ShadowFlow 用户的贴身秘书兼首席幕僚。你的职责："
+     "1) 倾听老板的需求，把模糊的想法拆解成可执行的任务；"
+     "2) 评估任务需要什么能力，建议老板招募哪些员工（Agent）或组建什么团队，"
+     "并协助完成招募与编队；"
+@@ -53,7 +54,7 @@ def _agents_dir() -> Path:
+ 
+ 
+ def ensure_secretary() -> Dict[str, Any] | None:
+-    """幂等播种内置秘书「影」。已存在则返回 None；新建则返回记录 dict。
++    """幂等播种内置秘书。已存在则返回 None；新建则返回记录 dict。
+ 
+     注意：与 agents.py 的 _save_agent 不同，这里不做 path-traversal 校验
+     （固定常量 id，无用户输入），保持模块零依赖（不 import fastapi）。
+@@ -80,9 +81,10 @@ def ensure_secretary() -> Dict[str, Any] | None:
+         "created_at": now,
+         "avatar_color": None,
+         "claw_id": None,
+-        "avatar_style": "bottts-neutral",
+-        # 固定 seed：影的头像稳定不随 hash 抖动
+-        "avatar_seed": "shadow-secretary",
++        "avatar_style": "lorelei",
++        # 固定 seed：头像稳定不随 hash 抖动（2026-11-06 换默认头像：
++        # dylan 大汉款 → lorelei·mishu 暖笑亲和款）。
++        "avatar_seed": "mishu",
+         "avatar_image": None,
+     }
+     target.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+diff --git a/tests/test_groups_settings.py b/tests/test_groups_settings.py
+index 8a2cd99..10324ba 100644
+--- a/tests/test_groups_settings.py
++++ b/tests/test_groups_settings.py
+@@ -128,6 +128,25 @@ class TestPatchGroup:
+         )
+         assert res.status_code == 422
+ 
++    def test_patch_group_team_id_link_and_clear(
++        self, client: TestClient, fresh_group: str
++    ):
++        # 2026-11-06 编队补链：建群即建编队 —— 自由群 find-or-create 同名团队
++        # 后回填挂链；空串 = 清除（与 conversation_id 同语义）。
++        res = client.patch(
++            f"/api/groups/{fresh_group}", json={"team_id": "team-heal-1"}
++        )
++        assert res.status_code == 200, res.text
++        assert res.json()["data"]["team_id"] == "team-heal-1"
++        res2 = client.get(f"/api/groups/{fresh_group}")
++        assert res2.json()["data"]["team_id"] == "team-heal-1"
++        # 空串清链 → None
++        res3 = client.patch(
++            f"/api/groups/{fresh_group}", json={"team_id": ""}
++        )
++        assert res3.status_code == 200
++        assert res3.json()["data"]["team_id"] is None
++
+ 
+ # ---------------------------------------------------------------------------
+ # GET/PUT /api/groups/{id}/user-settings

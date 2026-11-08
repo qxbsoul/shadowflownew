@@ -1,0 +1,1091 @@
+diff --git a/server/src/routes/__tests__/groups-event-sse-replay.test.ts b/server/src/routes/__tests__/groups-event-sse-replay.test.ts
+new file mode 100644
+index 0000000..841482e
+--- /dev/null
++++ b/server/src/routes/__tests__/groups-event-sse-replay.test.ts
+@@ -0,0 +1,271 @@
++/**
++ * routes/__tests__/groups-event-sse-replay.test.ts — 群 SSE 断线补帧兜底（2026-11-07）。
++ *
++ * 覆盖 groups-event-bus.ts 的「组内单调 id + 环形缓冲 + 游标补发」与
++ * groups-node.ts GET /:id/events 的「id: 行 + Last-Event-ID/?last_event_id 游标
++ * 续传 + 先订阅后补帧去重」。Python 侧同日对称改动见
++ * tests/test_group_events_replay.py。
++ *
++ * 隔离：chdir 临时目录 + sqlite._resetForTests()（同 groups-node.test.ts）。
++ * SSE 集成用真实端口 + http.request 流式读（仓库无 supertest）。
++ */
++
++import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
++import express, { type Express } from 'express';
++import http from 'http';
++import fs from 'fs';
++import path from 'path';
++import os from 'os';
++
++import * as sqlite from '../../storage/sqlite';
++import { groupsNodeRouter } from '../groups-node';
++import {
++  publishGroupEvent,
++  subscribe,
++  unsubscribe,
++  getGroupEventsAfter,
++  latestSeq,
++  subscriberCount,
++  resetGroupEventBusForTests,
++  REPLAY_BUFFER_MAX,
++} from '../groups-event-bus';
++
++// ── SSE 测试工具 ──────────────────────────────────────────────────────────────
++
++interface SseConn {
++  raw: () => string;
++  waitFor: (pred: (raw: string) => boolean, label: string) => Promise<void>;
++  close: () => void;
++}
++
++function openSse(port: number, urlPath: string, headers: Record<string, string> = {}): SseConn {
++  const chunks: string[] = [];
++  const req = http.request(
++    { host: '127.0.0.1', port, method: 'GET', path: urlPath, headers: { Accept: 'text/event-stream', ...headers } },
++    (res) => {
++      res.setEncoding('utf-8');
++      res.on('data', (c: string) => chunks.push(c));
++    },
++  );
++  req.end();
++  return {
++    raw: () => chunks.join(''),
++    waitFor: (pred, label) =>
++      new Promise((resolve, reject) => {
++        const t0 = Date.now();
++        const tick = () => {
++          if (pred(chunks.join(''))) return resolve();
++          if (Date.now() - t0 > 3000) {
++            return reject(new Error(`waitFor timeout (${label}); raw=${chunks.join('')}`));
++          }
++          setTimeout(tick, 5);
++        };
++        tick();
++      }),
++    close: () => {
++      req.destroy();
++    },
++  };
++}
++
++let app: Express;
++let server: http.Server;
++let port: number;
++let origCwd: string;
++let tmpDir: string;
++
++beforeAll(async () => {
++  origCwd = process.cwd();
++  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-groups-sse-'));
++  process.chdir(tmpDir);
++  sqlite._resetForTests();
++  sqlite.getDb();
++
++  app = express();
++  app.use(express.json());
++  app.use('/api/groups', groupsNodeRouter);
++  await new Promise<void>((resolve) => {
++    server = app.listen(0, () => {
++      port = (server.address() as { port: number }).port;
++      resolve();
++    });
++  });
++});
++
++afterAll(async () => {
++  await new Promise<void>((resolve) => server.close(() => resolve()));
++  sqlite._resetForTests();
++  process.chdir(origCwd);
++  try {
++    fs.rmSync(tmpDir, { recursive: true, force: true });
++  } catch {
++    /* ignore */
++  }
++});
++
++beforeEach(() => {
++  resetGroupEventBusForTests();
++});
++
++async function createGroup(name: string): Promise<string> {
++  const r = await fetch(`http://127.0.0.1:${port}/api/groups`, {
++    method: 'POST',
++    headers: { 'Content-Type': 'application/json' },
++    body: JSON.stringify({ name }),
++  });
++  const body = (await r.json()) as { group_id: string };
++  return body.group_id;
++}
++
++const msg = (m: string) => ({ type: 'agent.message', data: { content: m } });
++
++// ── 总线单测 ─────────────────────────────────────────────────────────────────
++
++describe('groups-event-bus — seq + replay buffer', () => {
++  it('publish 分配组内单调 id，组间独立', () => {
++    expect(publishGroupEvent('a', msg('1'))).toBe(0);
++    expect(publishGroupEvent('a', msg('2'))).toBe(1);
++    expect(publishGroupEvent('b', msg('1'))).toBe(0);
++    expect(latestSeq('a')).toBe(1);
++  });
++
++  it('事件以副本附 id 发出，不改调用方对象', () => {
++    const original = msg('x');
++    const seen: Array<{ id?: number }> = [];
++    const fn = (e: { id?: number }) => seen.push(e);
++    subscribe('g', fn);
++    publishGroupEvent('g', original);
++    unsubscribe('g', fn);
++    expect(original).not.toHaveProperty('id');
++    expect(seen[0].id).toBe(0);
++  });
++
++  it('无订阅者也入缓冲（断线窗口的帧不丢）', () => {
++    publishGroupEvent('g', msg('lost-then-found'));
++    expect(getGroupEventsAfter('g', null).map((e) => e.id)).toEqual([0]);
++  });
++
++  it('agent.typing 占 id 但不入缓冲', () => {
++    publishGroupEvent('g', { type: 'agent.typing', data: {} });
++    publishGroupEvent('g', msg('after-typing'));
++    expect(latestSeq('g')).toBe(1);
++    expect(getGroupEventsAfter('g', null).map((e) => e.id)).toEqual([1]);
++  });
++
++  it('getGroupEventsAfter 游标语义：过滤 / null 全量 / 越界旧游标全量 / 水位处空', () => {
++    for (let i = 0; i < 4; i++) publishGroupEvent('g', msg(`m${i}`));
++    expect(getGroupEventsAfter('g', 1).map((e) => e.id)).toEqual([2, 3]);
++    expect(getGroupEventsAfter('g', null).map((e) => e.id)).toEqual([0, 1, 2, 3]);
++    // 进程重启后 seq 归零的旧游标（42 > 水位 3）→ 视同无游标全量补发
++    expect(getGroupEventsAfter('g', 42).map((e) => e.id)).toEqual([0, 1, 2, 3]);
++    expect(getGroupEventsAfter('g', 3)).toEqual([]);
++  });
++
++  it('环形缓冲驱逐最旧，seq 不受驱逐影响', () => {
++    let seq = -1;
++    for (let i = 0; i < REPLAY_BUFFER_MAX + 10; i++) seq = publishGroupEvent('g', msg(`m${i}`));
++    const ids = getGroupEventsAfter('g', null).map((e) => e.id);
++    expect(ids).toHaveLength(REPLAY_BUFFER_MAX);
++    expect(ids[0]).toBe(10);
++    expect(seq).toBe(REPLAY_BUFFER_MAX + 10 - 1);
++  });
++
++  it('缓冲在退订后保留（断线重连的恢复源）', () => {
++    const fn = () => {};
++    subscribe('g', fn);
++    publishGroupEvent('g', msg('m'));
++    unsubscribe('g', fn);
++    expect(subscriberCount('g')).toBe(0);
++    expect(getGroupEventsAfter('g', null).map((e) => e.id)).toEqual([0]);
++  });
++});
++
++// ── 端点集成：id: 行 + 游标续传 + 先订阅后补帧去重 ───────────────────────────
++
++describe('GET /:id/events — 断线补帧', () => {
++  it('live 帧带 id: 行（Last-Event-ID 恢复锚点）', async () => {
++    const gid = await createGroup('LiveIdLine');
++    const conn = openSse(port, `/api/groups/${gid}/events`);
++    await conn.waitFor((r) => r.includes(': connected'), 'connected');
++    publishGroupEvent(gid, msg('hello'));
++    await conn.waitFor((r) => r.includes('hello'), 'live frame');
++    expect(conn.raw()).toContain('id: 0\nevent: agent.message\ndata: {"content":"hello"}');
++    conn.close();
++  });
++
++  it('带 Last-Event-ID 重连：只补缺失帧，live 继续', async () => {
++    const gid = await createGroup('ReconnectReplay');
++    publishGroupEvent(gid, msg('A')); // id 0 —— 客户端已看过
++
++    const first = openSse(port, `/api/groups/${gid}/events`);
++    await first.waitFor((r) => r.includes('"content":"A"'), 'first A');
++    first.close();
++
++    publishGroupEvent(gid, msg('B')); // id 1 —— 断线窗口
++    publishGroupEvent(gid, msg('C')); // id 2 —— 断线窗口
++
++    const second = openSse(port, `/api/groups/${gid}/events`, { 'Last-Event-ID': '0' });
++    await second.waitFor((r) => r.includes('"content":"C"'), 'replayed C');
++    const raw = second.raw();
++    expect(raw).not.toContain('"content":"A"'); // 游标之后才补
++    expect(raw.indexOf('id: 1\n')).toBeGreaterThan(-1);
++    expect(raw.indexOf('id: 1\n')).toBeLessThan(raw.indexOf('id: 2\n')); // 按序补
++
++    publishGroupEvent(gid, msg('D')); // id 3 —— 重连后 live
++    await second.waitFor((r) => r.includes('"content":"D"'), 'live D');
++    second.close();
++  });
++
++  it('无游标连接（浏览器未设过 Last-Event-ID）→ 全量补发缓冲', async () => {
++    const gid = await createGroup('NoCursor');
++    publishGroupEvent(gid, msg('A'));
++    publishGroupEvent(gid, msg('B'));
++    const conn = openSse(port, `/api/groups/${gid}/events`);
++    await conn.waitFor((r) => r.includes('"content":"B"'), 'replayed B');
++    expect(conn.raw()).toContain('"content":"A"');
++    conn.close();
++  });
++
++  it('进程重启后旧游标越界 → 全量补发（客户端幂等去重兜底）', async () => {
++    const gid = await createGroup('StaleCursor');
++    publishGroupEvent(gid, msg('A'));
++    const conn = openSse(port, `/api/groups/${gid}/events`, { 'Last-Event-ID': '42' });
++    await conn.waitFor((r) => r.includes('"content":"A"'), 'replayed A');
++    conn.close();
++  });
++
++  it('?last_event_id= 查询参数等效（sseClient 约定）', async () => {
++    const gid = await createGroup('QueryCursor');
++    publishGroupEvent(gid, msg('A'));
++    publishGroupEvent(gid, msg('B'));
++    const conn = openSse(port, `/api/groups/${gid}/events?last_event_id=0`);
++    await conn.waitFor((r) => r.includes('"content":"B"'), 'replayed B');
++    expect(conn.raw()).not.toContain('"content":"A"');
++    conn.close();
++  });
++
++  it('agent.typing 不补发（瞬态帧），但 id 序列不受影响', async () => {
++    const gid = await createGroup('TypingSkip');
++    publishGroupEvent(gid, { type: 'agent.typing', data: { agent: 'a' } }); // id 0
++    publishGroupEvent(gid, msg('B')); // id 1
++    const conn = openSse(port, `/api/groups/${gid}/events`);
++    await conn.waitFor((r) => r.includes('"content":"B"'), 'replayed B');
++    const raw = conn.raw();
++    expect(raw).not.toContain('agent.typing');
++    expect(raw).toContain('id: 1\nevent: agent.message');
++    conn.close();
++  });
++
++  it('补帧期间的 live 帧按水位去重（先订阅后补帧）', async () => {
++    const gid = await createGroup('OverlapDedupe');
++    publishGroupEvent(gid, msg('A')); // id 0 —— 断线窗口
++    // 无游标连接会全量补发缓冲；A 只应出现一次（补发路径），不因订阅重叠重复
++    const conn = openSse(port, `/api/groups/${gid}/events`);
++    await conn.waitFor((r) => r.includes('"content":"A"'), 'replayed A');
++    publishGroupEvent(gid, msg('B')); // id 1 —— 实时
++    await conn.waitFor((r) => r.includes('"content":"B"'), 'live B');
++    const occurrences = conn.raw().split('"content":"A"').length - 1;
++    expect(occurrences).toBe(1);
++    conn.close();
++  });
++});
+diff --git a/server/src/routes/groups-event-bus.ts b/server/src/routes/groups-event-bus.ts
+index 9736b9f..fb1f235 100644
+--- a/server/src/routes/groups-event-bus.ts
++++ b/server/src/routes/groups-event-bus.ts
+@@ -6,16 +6,28 @@
+  * groups-chat.ts 网关在 node 模式下把 agent 回复 / system 通知 publish 到这里，
+  * 浏览器即可实时看到（取代 Python SSE bus）。
+  *
+- * 事件形状：{ type: 'agent.message' | 'system.notice' | 'agent.typing', data: {...} }。
+- * SSE 端把 type → `event:` 行、data → `data:` 行。
++ * 事件形状：{ id, type: 'agent.message' | 'system.notice' | 'agent.typing', data: {...} }。
++ * SSE 端把 id → `id:` 行、type → `event:` 行、data → `data:` 行。
+  *
+  * 设计同 Python：
+  *   - 仅进程内（多 worker 不跨进程；单进程 Node 网关无此问题）。
+  *   - best-effort：listener 抛错被吞，不阻塞 publisher。
+- *   - 自清理：最后一个 listener 退订后删除该 group 的 bucket。
++ *   - 自清理：最后一个 listener 退订后删除该 group 的 **订阅** bucket。
++ *
++ * 2026-11-07 — 断线补帧兜底（对齐 Python _group_events 同日改动）：
++ *   - publish 给每条事件发**组内单调 id**（从 0 起，进程重启归零），并落入
++ *     有界环形缓冲（默认 100 条）；**无订阅者不再丢帧**（断线窗口的事件可补）。
++ *   - `agent.typing` 等瞬态提示帧不入缓冲（补发陈旧 typing 无意义），但仍占 id，
++ *     保证 Last-Event-ID 游标单调。
++ *   - getGroupEventsAfter(groupId, cursor) 返回应补发的帧：
++ *     cursor 之后的全部缓冲帧；cursor 缺省（null）→ 全量补发（客户端按消息
++ *     id 幂等去重，重复无害）；cursor 大于当前水位（进程重启后旧游标）→ 同全量。
++ *   - 缓冲在退订后**保留**（这正是断线重连的恢复源），只按容量驱逐。
+  */
+ 
+ export interface GroupEvent {
++  /** 组内单调事件序号（publish 时分配；客户端 Last-Event-ID 游标用）。 */
++  id: number;
+   type: string;
+   data: unknown;
+ }
+@@ -24,6 +36,30 @@ type Listener = (event: GroupEvent) => void;
+ 
+ const subscribers = new Map<string, Set<Listener>>();
+ 
++// ── 断线补帧：组内 seq + 环形缓冲（2026-11-07）────────────────────────────────
++/** 每组保留最近多少条可回放事件（超出驱逐最旧）。 */
++export const REPLAY_BUFFER_MAX = 100;
++/** 瞬态帧：占 id 但不入缓冲（补发陈旧 typing 无意义）。 */
++export const REPLAY_SKIP_TYPES = new Set(['agent.typing']);
++/** 兜底：极端群数上限，超出按「最久未发布」整组驱逐，防内存无界。 */
++const MAX_TRACKED_GROUPS = 200;
++
++const seqCounters = new Map<string, number>();
++const replayBuffers = new Map<string, GroupEvent[]>();
++
++function nextSeq(groupId: string): number {
++  const seq = seqCounters.get(groupId) ?? 0;
++  seqCounters.set(groupId, seq + 1);
++  return seq;
++}
++
++function evictOldestGroupIfNeeded(): void {
++  if (replayBuffers.size <= MAX_TRACKED_GROUPS) return;
++  // Map 迭代序 = 插入序；新组 append 到尾部，头部即最久未见。
++  const oldest = replayBuffers.keys().next();
++  if (!oldest.done) replayBuffers.delete(oldest.value);
++}
++
+ /** 订阅某群事件。 */
+ export function subscribe(groupId: string, fn: Listener): void {
+   let set = subscribers.get(groupId);
+@@ -34,7 +70,7 @@ export function subscribe(groupId: string, fn: Listener): void {
+   set.add(fn);
+ }
+ 
+-/** 退订；bucket 空时删除（防止无界增长）。 */
++/** 退订；订阅 bucket 空时删除（防止无界增长）。**缓冲不删**——断线重连要靠它补帧。 */
+ export function unsubscribe(groupId: string, fn: Listener): void {
+   const set = subscribers.get(groupId);
+   if (!set) return;
+@@ -42,20 +78,66 @@ export function unsubscribe(groupId: string, fn: Listener): void {
+   if (set.size === 0) subscribers.delete(groupId);
+ }
+ 
+-/** 向某群所有订阅者推送一个事件。无订阅者 = no-op。listener 抛错被吞。 */
+-export function publishGroupEvent(groupId: string, event: GroupEvent): void {
++/**
++ * 向某群所有订阅者推送一个事件。listener 抛错被吞。
++ * 返回分配到的组内单调 id。事件以副本发出（附 id），不改调用方对象。
++ *
++ * 2026-11-07 起：即使无订阅者也分配 id 并入缓冲（瞬态帧除外），供断线补帧。
++ */
++export function publishGroupEvent(groupId: string, event: Omit<GroupEvent, 'id'>): number {
++  const id = nextSeq(groupId);
++  const payload: GroupEvent = { ...event, id };
++
++  if (!REPLAY_SKIP_TYPES.has(event.type)) {
++    let buf = replayBuffers.get(groupId);
++    if (!buf) {
++      evictOldestGroupIfNeeded();
++      buf = [];
++      replayBuffers.set(groupId, buf);
++    }
++    buf.push(payload);
++    if (buf.length > REPLAY_BUFFER_MAX) buf.splice(0, buf.length - REPLAY_BUFFER_MAX);
++  }
++
+   const set = subscribers.get(groupId);
+-  if (!set) return;
+-  for (const fn of [...set]) {
+-    try {
+-      fn(event);
+-    } catch {
+-      /* best-effort — 一个坏 listener 不能阻塞其他订阅者 */
++  if (set) {
++    for (const fn of [...set]) {
++      try {
++        fn(payload);
++      } catch {
++        /* best-effort — 一个坏 listener 不能阻塞其他订阅者 */
++      }
+     }
+   }
++  return id;
++}
++
++/**
++ * 断线重连补帧集：缓冲中 id > cursor 的全部事件（按 id 升序）。
++ * - cursor = null（未带游标的新连接）→ 全量补发；客户端按消息 id 幂等去重。
++ * - cursor > 当前水位（进程重启后 seq 归零，旧游标越界）→ 视同无游标全量补发。
++ * - 缓冲已驱逐的部分补不回（返回仍存在的帧；宁可缺口不重复）。
++ */
++export function getGroupEventsAfter(groupId: string, cursor: number | null): GroupEvent[] {
++  const buf = replayBuffers.get(groupId) ?? [];
++  const latest = (seqCounters.get(groupId) ?? 0) - 1;
++  const effective = cursor !== null && cursor <= latest ? cursor : -1;
++  return buf.filter((e) => e.id > effective);
++}
++
++/** 当前水位（最后分配的 id；无事件为 -1）。测试用。 */
++export function latestSeq(groupId: string): number {
++  return (seqCounters.get(groupId) ?? 0) - 1;
+ }
+ 
+ /** 订阅者数（测试用）。 */
+ export function subscriberCount(groupId: string): number {
+   return subscribers.get(groupId)?.size ?? 0;
+ }
++
++/** 清空全部总线状态（测试隔离用）。 */
++export function resetGroupEventBusForTests(): void {
++  subscribers.clear();
++  seqCounters.clear();
++  replayBuffers.clear();
++}
+diff --git a/server/src/routes/groups-node.ts b/server/src/routes/groups-node.ts
+index 7a96323..264445f 100644
+--- a/server/src/routes/groups-node.ts
++++ b/server/src/routes/groups-node.ts
+@@ -438,9 +438,30 @@ router.put('/:id/user-settings', (req: Request, res: Response) => {
+ // ── GET /api/groups/:id/events — SSE ──────────────────────────────────────────
+ // 对齐 stream_group_events：event agent.message / system.notice / agent.typing。
+ // Node 侧用本模块内存事件总线（见 groups-event-bus.ts）。群不存在 → 404。
+-// 帧格式：`event: <type>\ndata: <json>\n\n`；15s keepalive 注释帧。
+-
+-import { subscribe, unsubscribe } from './groups-event-bus';
++// 帧格式：`id: <seq>\nevent: <type>\ndata: <json>\n\n`；15s keepalive 注释帧。
++//
++// 2026-11-07 — 断线补帧兜底：帧带组内单调 id；连接时按游标补发缓冲中缺失帧，
++// 浏览器 EventSource 自动重连会带 Last-Event-ID 头（sseClient 也支持
++// ?last_event_id= / ?after= 查询参数），断线窗口的帧不再永久丢失。
++// 补帧顺序：先订阅再补发，live 帧 id ≤ 已补发水位则跳过（去重）。
++
++import {
++  subscribe,
++  unsubscribe,
++  getGroupEventsAfter,
++  type GroupEvent,
++} from './groups-event-bus';
++
++/** 游标解析：Last-Event-ID 头优先，其次 ?last_event_id= / ?after=。无效 → null（全量补发）。 */
++function parseReplayCursor(req: Request): number | null {
++  const raw =
++    (typeof req.headers['last-event-id'] === 'string' ? req.headers['last-event-id'] : undefined) ??
++    (typeof req.query.last_event_id === 'string' ? req.query.last_event_id : undefined) ??
++    (typeof req.query.after === 'string' ? req.query.after : undefined);
++  if (raw === undefined) return null;
++  const n = Number.parseInt(raw, 10);
++  return Number.isFinite(n) && n >= 0 ? n : null;
++}
+ 
+ router.get('/:id/events', (req: Request, res: Response) => {
+   const rec = store.getGroup(req.params.id);
+@@ -455,15 +476,35 @@ router.get('/:id/events', (req: Request, res: Response) => {
+     'X-Accel-Buffering': 'no',
+   });
+   res.write(': connected\n\n');
++  // 断开的客户端继续 write 只该安静失败（bus 已吞 listener 抛错，这里兜住流错误）。
++  res.on('error', () => {});
++  const write = (s: string) => {
++    try {
++      res.write(s);
++    } catch {
++      /* 客户端已断开 */
++    }
++  };
+ 
+   const groupId = req.params.id;
+-  const onEvent = (event: { type: string; data: unknown }) => {
+-    res.write(`event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`);
++  const cursor = parseReplayCursor(req);
++  // 水位基线从「实际发出」起算而非游标：进程重启后 seq 归零，旧游标可能远大于
++  // 新 id（42 vs 6），以游标为基线会把重启后的 live 帧全部误杀。
++  let lastSentId = -1;
++  const onEvent = (event: GroupEvent) => {
++    if (event.id <= lastSentId) return; // 补帧与 live 重叠去重
++    lastSentId = event.id;
++    write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`);
+   };
++  // 先订阅后补帧：订阅与补发之间 publish 的帧走 live 回调，由 lastSentId 去重，
++  // 不丢不重（Node 单线程下实际不会交错，去重是保险丝）。
+   subscribe(groupId, onEvent);
++  for (const ev of getGroupEventsAfter(groupId, cursor)) {
++    onEvent(ev);
++  }
+ 
+   const keepalive = setInterval(() => {
+-    res.write(': keepalive\n\n');
++    write(': keepalive\n\n');
+   }, 15000);
+ 
+   req.on('close', () => {
+diff --git a/shadowflow/api/_group_events.py b/shadowflow/api/_group_events.py
+index 6eb4ef9..1831307 100644
+--- a/shadowflow/api/_group_events.py
++++ b/shadowflow/api/_group_events.py
+@@ -17,21 +17,28 @@ Design notes
+ - **Self-cleaning**: when a group's last subscriber unsubscribes, its bucket is
+   removed so the dict doesn't grow unbounded.
+ 
+-Event shape: ``{"type": "agent.message" | "system.notice" | "agent.typing",
++Event shape: ``{"id": <seq>, "type": "agent.message" | "system.notice" | "agent.typing",
+ "data": {...}}``. The SSE endpoint serialises ``data`` as the SSE ``data:``
+-line and ``type`` as the ``event:`` line.
++line, ``type`` as the ``event:`` line and ``id`` as the ``id:`` line.
+ 
+ History
+ -------
+ 2026-05-29 — Created for the real-chat (DM + group) work: closes the gap where
+ agent replies landed in the group JSON file but the UI never saw them without a
+ manual refresh.
++2026-11-07 — Disconnect replay (mirror of Node groups-event-bus.ts): every
++event gets a per-group monotonic ``id`` and replayable events land in a bounded
++ring buffer so a client that lost its SSE connection can catch up via the
++``Last-Event-ID`` cursor. ``agent.typing`` frames are transient (they get an
++id but are never buffered). Publishing with zero subscribers no longer drops
++the event — it stays in the buffer for the reconnecting client.
+ """
+ 
+ from __future__ import annotations
+ 
+ import asyncio
+-from typing import Any, Dict, List
++from collections import deque
++from typing import Any, Deque, Dict, List, Optional
+ 
+ # group_id -> list of subscriber queues
+ _subscribers: Dict[str, List[asyncio.Queue]] = {}
+@@ -39,6 +46,14 @@ _subscribers: Dict[str, List[asyncio.Queue]] = {}
+ # Bounded so a slow/dead client can't grow memory without limit.
+ _QUEUE_MAXSIZE = 100
+ 
++# ── Disconnect replay: per-group seq + ring buffer (2026-11-07) ──────────────
++_REPLAY_BUFFER_MAX = 100  # keep the newest 100 replayable events per group
++_REPLAY_SKIP_TYPES = {"agent.typing"}  # transient hint frames: id but no replay
++_MAX_TRACKED_GROUPS = 200  # safety valve: evict whole buffers FIFO beyond this
++
++_seq_counters: Dict[str, int] = {}
++_replay_buffers: Dict[str, Deque[Dict[str, Any]]] = {}
++
+ 
+ def subscribe(group_id: str) -> asyncio.Queue:
+     """Register a new subscriber queue for ``group_id`` and return it."""
+@@ -48,7 +63,11 @@ def subscribe(group_id: str) -> asyncio.Queue:
+ 
+ 
+ def unsubscribe(group_id: str, q: asyncio.Queue) -> None:
+-    """Remove a subscriber queue; drop the bucket when it becomes empty."""
++    """Remove a subscriber queue; drop the bucket when it becomes empty.
++
++    The replay buffer is intentionally kept (it is the recovery source for a
++    reconnecting client); only the subscriber bucket is cleaned up.
++    """
+     queues = _subscribers.get(group_id)
+     if not queues:
+         return
+@@ -60,19 +79,76 @@ def unsubscribe(group_id: str, q: asyncio.Queue) -> None:
+         _subscribers.pop(group_id, None)
+ 
+ 
+-def publish_group_event(group_id: str, event: Dict[str, Any]) -> None:
++def publish_group_event(group_id: str, event: Dict[str, Any]) -> int:
+     """Push an event to all subscribers of ``group_id``.
+ 
+     Best-effort: full queues are skipped so a stuck client never blocks the
+-    background dispatch task. No-op when nobody is listening.
++    background dispatch task.
++
++    Returns the assigned per-group monotonic ``id`` (0-based, resets when the
++    process restarts). The event is delivered as a copy carrying that ``id``.
++
++    Since 2026-11-07 the event is also appended to a bounded replay buffer
++    (except transient ``agent.typing`` frames) even when nobody is listening,
++    so frames published during a client disconnect can be replayed on
++    reconnect via :func:`get_group_events_after`.
+     """
++    seq = _seq_counters.get(group_id, 0)
++    _seq_counters[group_id] = seq + 1
++    payload = {**event, "id": seq}
++
++    if event.get("type") not in _REPLAY_SKIP_TYPES:
++        buf = _replay_buffers.get(group_id)
++        if buf is None:
++            if len(_replay_buffers) >= _MAX_TRACKED_GROUPS:
++                # Map/dict insertion order: the first key is the least recently
++                # published group — evict its buffer wholesale.
++                stale = next(iter(_replay_buffers), None)
++                if stale is not None:
++                    _replay_buffers.pop(stale, None)
++            buf = deque(maxlen=_REPLAY_BUFFER_MAX)
++            _replay_buffers[group_id] = buf
++        buf.append(payload)
++
+     for q in list(_subscribers.get(group_id, [])):
+         try:
+-            q.put_nowait(event)
++            q.put_nowait(payload)
+         except asyncio.QueueFull:
+             pass
++    return seq
++
++
++def get_group_events_after(
++    group_id: str, cursor: Optional[int] = None
++) -> List[Dict[str, Any]]:
++    """Replay set for a reconnecting client: buffered events with ``id > cursor``.
++
++    - ``cursor=None`` (fresh connection without a cursor) → replay the whole
++      buffer. The client dedupes by ``message_id`` so duplicates are harmless,
++      and this also covers reconnects whose ``Last-Event-ID`` never got set
++      (connection dropped while the group was idle).
++    - ``cursor`` greater than the current high-water mark (a stale cursor from
++      before a server restart reset the seqs) → treated as ``None``.
++    - Evicted frames cannot be recovered; only what remains is replayed.
++    """
++    buf = _replay_buffers.get(group_id, ())
++    latest = _seq_counters.get(group_id, 0) - 1
++    effective = cursor if (cursor is not None and cursor <= latest) else -1
++    return [e for e in buf if e["id"] > effective]
++
++
++def latest_seq(group_id: str) -> int:
++    """High-water mark (id of the last assigned event; -1 when none). Tests."""
++    return _seq_counters.get(group_id, 0) - 1
+ 
+ 
+ def subscriber_count(group_id: str) -> int:
+     """Number of live subscribers for a group (used by tests)."""
+     return len(_subscribers.get(group_id, []))
++
++
++def reset_for_tests() -> None:
++    """Drop all bus state (subscribers, seqs, replay buffers). Tests only."""
++    _subscribers.clear()
++    _seq_counters.clear()
++    _replay_buffers.clear()
+diff --git a/shadowflow/api/groups.py b/shadowflow/api/groups.py
+index d4c2b43..f5097f3 100644
+--- a/shadowflow/api/groups.py
++++ b/shadowflow/api/groups.py
+@@ -608,30 +608,54 @@ async def post_group_message(
+ async def stream_group_events(group_id: str, request: Request) -> StreamingResponse:
+     """SSE stream of a group's live events.
+ 
+-    Events emitted (``event:`` line → ``data:`` JSON):
++    Events emitted (``id:`` seq → ``event:`` line → ``data:`` JSON):
+       agent.message  — an agent reply was appended to the group
+       system.notice  — a bridge/system notice was appended
+       agent.typing   — an agent is composing a reply (optional UX hint)
+ 
+     Keepalive comments every 15s keep the connection open through proxies.
++
++    2026-11-07 — Disconnect replay: frames carry a per-group monotonic ``id``.
++    On connect the stream first replays buffered events missing since the
++    client's cursor (``Last-Event-ID`` header — sent automatically by the
++    browser's EventSource auto-reconnect — or ``?last_event_id=`` / ``?after=``),
++    then continues live. Without a cursor the whole buffer is replayed; the
++    client dedupes by message_id so duplicates are harmless.
+     """
+     if _load_group(group_id) is None:
+         raise HTTPException(status_code=404, detail=f"Group not found: {group_id}")
+ 
+-    from shadowflow.api._group_events import subscribe, unsubscribe  # noqa: PLC0415
++    from shadowflow.api._group_events import (  # noqa: PLC0415
++        get_group_events_after,
++        subscribe,
++        unsubscribe,
++    )
++
++    cursor = _parse_replay_cursor(request)
+ 
+     async def _generate():
+         q = subscribe(group_id)
+         try:
+             yield ": connected\n\n"
++            # 补帧：先订阅再补发 —— 订阅与快照之间 publish 的帧两路都会到，
++            # 靠 last_sent 水位去重。水位从「实际发出」起算，不从游标起算
++            # （进程重启后 seq 归零，旧游标可能远大于新 id，以游标为基线会
++            # 把重启后的 live 帧全部误杀）。
++            last_sent = -1
++            for event in get_group_events_after(group_id, cursor):
++                last_sent = max(last_sent, event.get("id", -1))
++                yield _format_group_event(event)
+             while True:
+                 if await request.is_disconnected():
+                     break
+                 try:
+                     event = await asyncio.wait_for(q.get(), timeout=15.0)
+-                    event_type = event.get("type", "message")
+-                    data = json.dumps(event.get("data", {}), default=str)
+-                    yield f"event: {event_type}\ndata: {data}\n\n"
++                    ev_id = event.get("id")
++                    if ev_id is not None and ev_id <= last_sent:
++                        continue  # already replayed (or older) — dedupe
++                    if ev_id is not None:
++                        last_sent = ev_id
++                    yield _format_group_event(event)
+                 except asyncio.TimeoutError:
+                     yield ": keepalive\n\n"
+         finally:
+@@ -644,6 +668,34 @@ async def stream_group_events(group_id: str, request: Request) -> StreamingRespo
+     )
+ 
+ 
++def _format_group_event(event: Dict[str, Any]) -> str:
++    """One SSE frame: ``id:`` (when present) + ``event:`` + ``data:``."""
++    event_type = event.get("type", "message")
++    data = json.dumps(event.get("data", {}), default=str)
++    ev_id = event.get("id")
++    id_line = f"id: {ev_id}\n" if ev_id is not None else ""
++    return f"{id_line}event: {event_type}\ndata: {data}\n\n"
++
++
++def _parse_replay_cursor(request: Request) -> Optional[int]:
++    """Reconnect cursor: ``Last-Event-ID`` header first, then ?last_event_id= / ?after=.
++
++    Missing/invalid → None (replay the whole buffer; see get_group_events_after).
++    """
++    raw = request.headers.get("last-event-id")
++    if raw is None:
++        raw = request.query_params.get("last_event_id")
++    if raw is None:
++        raw = request.query_params.get("after")
++    if raw is None:
++        return None
++    try:
++        n = int(raw)
++    except (TypeError, ValueError):
++        return None
++    return n if n >= 0 else None
++
++
+ # ---------------------------------------------------------------------------
+ # Stream M 2026-05-29 — message-level actions: reactions + pin
+ # （消息悬浮工具栏「反应」「Pin」接后端；翻译/AI改写/转发见批 2）
+diff --git a/tests/test_group_chat_realtime.py b/tests/test_group_chat_realtime.py
+index 738e803..4d5becb 100644
+--- a/tests/test_group_chat_realtime.py
++++ b/tests/test_group_chat_realtime.py
+@@ -38,9 +38,9 @@ def _isolate_dirs(tmp_path, monkeypatch):
+     a.mkdir()
+     monkeypatch.setattr(groups_mod, "_GROUPS_DIR", g)
+     monkeypatch.setattr(agents_mod, "_AGENTS_DIR", a)
+-    _group_events._subscribers.clear()
++    _group_events.reset_for_tests()
+     yield
+-    _group_events._subscribers.clear()
++    _group_events.reset_for_tests()
+ 
+ 
+ @pytest.fixture(autouse=True)
+diff --git a/tests/test_group_events_replay.py b/tests/test_group_events_replay.py
+new file mode 100644
+index 0000000..d159c86
+--- /dev/null
++++ b/tests/test_group_events_replay.py
+@@ -0,0 +1,321 @@
++"""Group SSE disconnect replay (2026-11-07).
++
++Covers the shadowflow/api/_group_events.py seq + ring buffer + Last-Event-ID
++cursor catch-up — the Python half of the same-day Node change
++(server/src/routes/groups-event-bus.ts + groups-node.ts). Motivation: frames
++published while a client's SSE connection was down were dropped forever (the
++bus was a pure in-memory pub/sub with no buffering); a reconnecting browser
++now replays the missed frames via its Last-Event-ID cursor.
++
++Scope: bus primitives (ids / buffer / eviction / typing skip / cursor rules),
++the pure endpoint helpers (_format_group_event / _parse_replay_cursor), and
++the stream_group_events generator wiring (replay-before-live, overlap dedupe).
++
++Data isolation: _GROUPS_DIR monkeypatched to tmp_path and the bus reset between
++tests (same pattern as test_group_chat_realtime.py).
++"""
++
++from __future__ import annotations
++
++import asyncio
++from types import SimpleNamespace
++from typing import Any, Dict, List
++
++import pytest
++
++from shadowflow.api import _group_events
++from shadowflow.api import groups as groups_mod
++
++
++@pytest.fixture(autouse=True)
++def _isolate(tmp_path, monkeypatch):
++    g = tmp_path / "groups"
++    g.mkdir()
++    monkeypatch.setattr(groups_mod, "_GROUPS_DIR", g)
++    _group_events.reset_for_tests()
++    yield
++    _group_events.reset_for_tests()
++
++
++# ---------------------------------------------------------------------------
++# Bus: ids + replay buffer
++# ---------------------------------------------------------------------------
++
++
++class TestPublishAssignsIds:
++    def test_ids_monotonic_per_group(self):
++        a = _group_events.publish_group_event("g1", {"type": "agent.message", "data": {}})
++        b = _group_events.publish_group_event("g1", {"type": "agent.message", "data": {}})
++        assert (a, b) == (0, 1)
++
++    def test_groups_have_independent_seqs(self):
++        a = _group_events.publish_group_event("g1", {"type": "agent.message", "data": {}})
++        b = _group_events.publish_group_event("g2", {"type": "agent.message", "data": {}})
++        assert (a, b) == (0, 0)
++
++    def test_event_copy_carries_id_caller_dict_untouched(self):
++        original: Dict[str, Any] = {"type": "agent.message", "data": {"m": 1}}
++        q = _group_events.subscribe("g1")
++        _group_events.publish_group_event("g1", original)
++        assert "id" not in original
++        assert q.get_nowait()["id"] == 0
++
++    def test_typing_frames_still_get_ids(self):
++        _group_events.publish_group_event("g1", {"type": "agent.typing", "data": {}})
++        assert _group_events.latest_seq("g1") == 0
++
++
++class TestReplayBuffer:
++    def test_buffered_even_without_subscribers(self):
++        """断线窗口（无订阅者）的帧不再丢：入缓冲待补。"""
++        _group_events.publish_group_event("g1", {"type": "agent.message", "data": {"m": 1}})
++        assert [e["id"] for e in _group_events.get_group_events_after("g1")] == [0]
++
++    def test_typing_not_buffered(self):
++        _group_events.publish_group_event("g1", {"type": "agent.typing", "data": {}})
++        _group_events.publish_group_event("g1", {"type": "agent.message", "data": {}})
++        assert [e["id"] for e in _group_events.get_group_events_after("g1")] == [1]
++
++    def test_buffer_survives_unsubscribe(self):
++        q = _group_events.subscribe("g1")
++        _group_events.publish_group_event("g1", {"type": "agent.message", "data": {}})
++        _group_events.unsubscribe("g1", q)
++        assert _group_events.subscriber_count("g1") == 0
++        assert [e["id"] for e in _group_events.get_group_events_after("g1")] == [0]
++
++    def test_ring_buffer_evicts_oldest(self):
++        for i in range(_group_events._REPLAY_BUFFER_MAX + 20):
++            _group_events.publish_group_event("g1", {"type": "agent.message", "data": {"i": i}})
++        ids = [e["id"] for e in _group_events.get_group_events_after("g1")]
++        assert len(ids) == _group_events._REPLAY_BUFFER_MAX
++        assert ids[0] == 20  # 最旧 20 条被驱逐
++        assert ids[-1] == _group_events._REPLAY_BUFFER_MAX + 19
++
++    def test_seq_monotonic_regardless_of_eviction(self):
++        for _ in range(_group_events._REPLAY_BUFFER_MAX + 5):
++            seq = _group_events.publish_group_event("g1", {"type": "agent.message", "data": {}})
++        assert seq == _group_events._REPLAY_BUFFER_MAX + 5 - 1
++
++    def test_tracked_group_cap_evicts_whole_oldest_buffer(self):
++        cap = _group_events._MAX_TRACKED_GROUPS
++        for i in range(cap + 2):
++            _group_events.publish_group_event(f"g{i}", {"type": "agent.message", "data": {}})
++        assert len(_group_events._replay_buffers) == cap
++        # 最旧的两组整组被驱逐（g0/g1），最新一组仍在
++        assert _group_events.get_group_events_after("g0") == []
++        assert [e["id"] for e in _group_events.get_group_events_after(f"g{cap + 1}")] == [0]
++
++
++class TestGetAfterCursor:
++    def _seed(self):
++        for i in range(4):
++            _group_events.publish_group_event("g1", {"type": "agent.message", "data": {"i": i}})
++
++    def test_cursor_filters(self):
++        self._seed()
++        assert [e["id"] for e in _group_events.get_group_events_after("g1", 1)] == [2, 3]
++
++    def test_cursor_none_replays_all(self):
++        self._seed()
++        assert [e["id"] for e in _group_events.get_group_events_after("g1", None)] == [0, 1, 2, 3]
++
++    def test_stale_high_cursor_replays_all(self):
++        """进程重启后 seq 归零：旧游标越界 → 视同无游标全量补发（客户端幂等去重）。"""
++        self._seed()
++        assert [e["id"] for e in _group_events.get_group_events_after("g1", 42)] == [0, 1, 2, 3]
++
++    def test_cursor_at_watermark_replays_nothing(self):
++        self._seed()
++        assert _group_events.get_group_events_after("g1", 3) == []
++
++    def test_gap_from_eviction_replays_remaining(self):
++        for i in range(_group_events._REPLAY_BUFFER_MAX + 10):
++            _group_events.publish_group_event("g1", {"type": "agent.message", "data": {}})
++        # 游标落在被驱逐区间：补不回的宁可缺，不重复
++        ids = [e["id"] for e in _group_events.get_group_events_after("g1", 2)]
++        assert ids[0] == 10
++        assert len(ids) == _group_events._REPLAY_BUFFER_MAX
++
++
++# ---------------------------------------------------------------------------
++# Endpoint helpers (pure)
++# ---------------------------------------------------------------------------
++
++
++class TestFormatGroupEvent:
++    def test_frame_with_id(self):
++        frame = groups_mod._format_group_event({"id": 7, "type": "agent.message", "data": {"m": 1}})
++        assert frame.startswith("id: 7\n")
++        assert "\nevent: agent.message\n" in frame
++        assert '\ndata: {"m": 1}\n\n' in frame
++
++    def test_frame_without_id_has_no_id_line(self):
++        frame = groups_mod._format_group_event({"type": "system.notice", "data": {}})
++        assert not frame.startswith("id:")
++        assert frame.startswith("event: system.notice\n")
++
++
++class TestParseReplayCursor:
++    def _req(self, headers=None, query=None):
++        return SimpleNamespace(headers=headers or {}, query_params=query or {})
++
++    def test_header_wins(self):
++        req = self._req(headers={"last-event-id": "5"}, query={"last_event_id": "9"})
++        assert groups_mod._parse_replay_cursor(req) == 5
++
++    def test_query_fallbacks(self):
++        assert groups_mod._parse_replay_cursor(self._req(query={"last_event_id": "3"})) == 3
++        assert groups_mod._parse_replay_cursor(self._req(query={"after": "4"})) == 4
++
++    def test_invalid_returns_none(self):
++        assert groups_mod._parse_replay_cursor(self._req(headers={"last-event-id": "abc"})) is None
++        assert groups_mod._parse_replay_cursor(self._req(query={"after": "-1"})) is None
++        assert groups_mod._parse_replay_cursor(self._req()) is None
++
++
++# ---------------------------------------------------------------------------
++# Endpoint generator: replay-before-live + overlap dedupe
++# ---------------------------------------------------------------------------
++
++
++def _fake_request(cursor_calls: List[bool], headers=None, query=None):
++    """Fake Starlette Request: only is_disconnected() + cursor parsing are used."""
++
++    async def is_disconnected() -> bool:
++        return cursor_calls.pop(0) if cursor_calls else True
++
++    return SimpleNamespace(
++        headers=headers or {},
++        query_params=query or {},
++        is_disconnected=is_disconnected,
++    )
++
++
++async def _pull(iterator, n: int) -> List[str]:
++    out: List[str] = []
++    for _ in range(n):
++        out.append(await iterator.__anext__())
++    return out
++
++
++def _make_group(group_id: str) -> None:
++    groups_mod._save_group(
++        {
++            "group_id": group_id,
++            "name": "Replay Group",
++            "agent_ids": [],
++            "messages": [],
++        }
++    )
++
++
++class TestStreamGroupEventsReplay:
++    def test_fresh_connect_replays_buffer(self):
++        _make_group("g1")
++        _group_events.publish_group_event("g1", {"type": "agent.message", "data": {"m": "A"}})
++        _group_events.publish_group_event("g1", {"type": "agent.message", "data": {"m": "B"}})
++
++        resp = asyncio.run(groups_mod.stream_group_events("g1", _fake_request([True])))
++
++        async def run():
++            frames = await _pull(resp.body_iterator, 3)
++            await resp.body_iterator.aclose()
++            return frames
++
++        frames = asyncio.run(run())
++        assert frames[0] == ": connected\n\n"
++        assert frames[1].startswith("id: 0\n") and '"m": "A"' in frames[1]
++        assert frames[2].startswith("id: 1\n") and '"m": "B"' in frames[2]
++
++    def test_cursor_replays_only_missed(self):
++        _make_group("g1")
++        for i in range(3):
++            _group_events.publish_group_event("g1", {"type": "agent.message", "data": {"i": i}})
++
++        req = _fake_request([True], headers={"last-event-id": "0"})
++        resp = asyncio.run(groups_mod.stream_group_events("g1", req))
++
++        async def run():
++            frames = await _pull(resp.body_iterator, 3)
++            await resp.body_iterator.aclose()
++            return frames
++
++        frames = asyncio.run(run())
++        assert frames[0] == ": connected\n\n"
++        assert frames[1].startswith("id: 1\n")
++        assert frames[2].startswith("id: 2\n")
++
++    def test_stale_high_cursor_replays_whole_buffer(self):
++        _make_group("g1")
++        _group_events.publish_group_event("g1", {"type": "agent.message", "data": {"m": "A"}})
++
++        req = _fake_request([True], headers={"last-event-id": "42"})
++        resp = asyncio.run(groups_mod.stream_group_events("g1", req))
++
++        async def run():
++            frames = await _pull(resp.body_iterator, 2)
++            await resp.body_iterator.aclose()
++            return frames
++
++        frames = asyncio.run(run())
++        assert frames[0] == ": connected\n\n"
++        assert frames[1].startswith("id: 0\n")
++
++    def test_overlap_event_delivered_exactly_once(self):
++        """订阅与补帧快照之间 publish 的帧：回放与 live 两路都到，水位去重只发一次。"""
++        _make_group("g1")
++        _group_events.publish_group_event("g1", {"type": "agent.message", "data": {"m": "A"}})
++
++        # is_disconnected：主循环第 1 圈 False（走 live 队列）→ 第 2 圈 True（收场）
++        resp = asyncio.run(groups_mod.stream_group_events("g1", _fake_request([False, True])))
++
++        async def run():
++            frames = [await resp.body_iterator.__anext__()]  # : connected
++            # 生成器此刻已订阅但尚未快照 → C 同时进缓冲与队列
++            _group_events.publish_group_event("g1", {"type": "agent.message", "data": {"m": "C"}})
++            frames.append(await resp.body_iterator.__anext__())  # replay A
++            frames.append(await resp.body_iterator.__anext__())  # replay C
++            # 下一次恢复进主循环：live 队列里的 C 被水位去重 → 直接收场
++            ended = False
++            try:
++                frames.append(await resp.body_iterator.__anext__())
++            except StopAsyncIteration:
++                ended = True
++            return frames, ended
++
++        frames, ended = asyncio.run(run())
++        assert ended, "去重后不应再有帧，主循环应干净收场"
++        bodies = [f for f in frames if f != ": connected\n\n"]
++        assert len(bodies) == 2, f"overlap frame must appear once: {bodies!r}"
++        assert bodies[0].startswith("id: 0\n")
++        assert bodies[1].startswith("id: 1\n")
++
++    def test_typing_never_replayed(self):
++        _make_group("g1")
++        _group_events.publish_group_event("g1", {"type": "agent.typing", "data": {"agent": "a"}})
++        _group_events.publish_group_event("g1", {"type": "agent.message", "data": {"m": "B"}})
++
++        resp = asyncio.run(groups_mod.stream_group_events("g1", _fake_request([True])))
++
++        async def run():
++            frames = await _pull(resp.body_iterator, 2)
++            await resp.body_iterator.aclose()
++            return frames
++
++        frames = asyncio.run(run())
++        assert frames[0] == ": connected\n\n"
++        assert frames[1].startswith("id: 1\n")  # typing 占了 id 0 但不回放
++        assert all("agent.typing" not in f for f in frames)
++
++    def test_unsubscribe_on_close(self):
++        _make_group("g1")
++        resp = asyncio.run(groups_mod.stream_group_events("g1", _fake_request([True])))
++        assert _group_events.subscriber_count("g1") == 0  # 生成器未驱动时不订阅
++
++        async def run():
++            await _pull(resp.body_iterator, 1)  # 首拉才 subscribe
++            assert _group_events.subscriber_count("g1") == 1
++            await resp.body_iterator.aclose()
++
++        asyncio.run(run())
++        assert _group_events.subscriber_count("g1") == 0

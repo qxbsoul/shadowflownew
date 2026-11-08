@@ -1,0 +1,972 @@
+diff --git a/server/src/__tests__/emit-evidence-cards.test.ts b/server/src/__tests__/emit-evidence-cards.test.ts
+new file mode 100644
+index 0000000..4fe3d7b
+--- /dev/null
++++ b/server/src/__tests__/emit-evidence-cards.test.ts
+@@ -0,0 +1,108 @@
++/**
++ * 2026-11-07 检查器产出归属 — emitCommitCard/emitFileDiffCards 归属契约
++ * （NeoAgentInspector 工具卡/产出卡归属链路回归，与 emit-tool-chunk who 同批语义）：
++ *   - who 传入 → commit_record/file_diff 卡带 agent_id/agent_name（检查器按
++ *     agent 筛产出，「有 agent_id 的按 id 筛」）；
++ *   - 无 who（编排者合并提交 / 老调用）→ 不带归属字段，零行为变化；
++ *   - 并发交错：两 agent 的证据卡各自归属不串台（对齐 emit-tool-chunk 的
++ *     per-agent 槽测试）。
++ */
++import { describe, it, expect } from 'vitest';
++import { emitCommitCard, emitFileDiffCards } from '../routes/groups-chat';
++import type { TimelineMessage, MessagePatch } from '../lib/contracts';
++import type { GitFileDiff } from '../lib/git-introspect';
++
++function makeGw() {
++  const emitted: TimelineMessage[] = [];
++  let n = 0;
++  return {
++    gw: {
++      nextId: () => `gw_test_${++n}`,
++      turnId: 'turn_1',
++      emitMessage: (m: TimelineMessage) => emitted.push(m),
++      emitPatch: (_p: MessagePatch) => {},
++    },
++    emitted,
++  };
++}
++
++const baseCommit = {
++  repo: 'Scout',
++  sha: 'abc1234',
++  short_sha: 'abc1234',
++  message: '[sf] Scout: 扫描任务',
++  author: 'Scout',
++  files_changed: 1,
++  insertions: 3,
++  deletions: 1,
++};
++
++const baseDiffs: GitFileDiff[] = [
++  { path: 'src/a.ts', added: 2, removed: 0, lines: [] },
++  { path: 'src/b.ts', added: 1, removed: 1, lines: [] },
++];
++
++describe('emitCommitCard/emitFileDiffCards（检查器产出归属）', () => {
++  it('who 归属 — commit_record 带 agent_id/agent_name', () => {
++    const { gw, emitted } = makeGw();
++    emitCommitCard(gw, baseCommit, { agentId: 'a1', agentName: 'Scout' });
++    expect(emitted).toHaveLength(1);
++    const m = emitted[0] as Extract<TimelineMessage, { kind: 'commit_record' }>;
++    expect(m.kind).toBe('commit_record');
++    expect(m.sha).toBe('abc1234');
++    expect(m.agent_id).toBe('a1');
++    expect(m.agent_name).toBe('Scout');
++  });
++
++  it('who 归属 — file_diff 每张卡都带 agent_id/agent_name', () => {
++    const { gw, emitted } = makeGw();
++    emitFileDiffCards(gw, baseDiffs, { agentId: 'a1', agentName: 'Scout' });
++    expect(emitted).toHaveLength(2);
++    for (const m of emitted) {
++      const d = m as Extract<TimelineMessage, { kind: 'file_diff' }>;
++      expect(d.kind).toBe('file_diff');
++      expect(d.agent_id).toBe('a1');
++      expect(d.agent_name).toBe('Scout');
++    }
++    expect((emitted[0] as Extract<TimelineMessage, { kind: 'file_diff' }>).path).toBe('src/a.ts');
++    expect((emitted[1] as Extract<TimelineMessage, { kind: 'file_diff' }>).path).toBe('src/b.ts');
++  });
++
++  it('无 who（编排者合并提交/老调用）— 不带归属字段，零行为变化', () => {
++    const { gw, emitted } = makeGw();
++    emitCommitCard(gw, baseCommit);
++    emitFileDiffCards(gw, baseDiffs);
++    expect(emitted).toHaveLength(3);
++    for (const m of emitted) {
++      const withAttr = m as { agent_id?: string; agent_name?: string };
++      expect(withAttr.agent_id).toBeUndefined();
++      expect(withAttr.agent_name).toBeUndefined();
++    }
++  });
++
++  it('并发交错 — 两 agent 的证据卡各自归属不串台', () => {
++    const { gw, emitted } = makeGw();
++    emitCommitCard(gw, { ...baseCommit, sha: 'aaaaaaa', short_sha: 'aaaaaaa' }, { agentId: 'a1', agentName: 'A' });
++    emitCommitCard(gw, { ...baseCommit, sha: 'bbbbbbb', short_sha: 'bbbbbbb' }, { agentId: 'a2', agentName: 'B' });
++    emitFileDiffCards(gw, [{ path: 'a.ts', added: 1, removed: 0, lines: [] }], { agentId: 'a1', agentName: 'A' });
++    emitFileDiffCards(gw, [{ path: 'b.ts', added: 1, removed: 0, lines: [] }], { agentId: 'a2', agentName: 'B' });
++
++    expect(emitted.map((m) => [m.kind, (m as { agent_id?: string }).agent_id])).toEqual([
++      ['commit_record', 'a1'],
++      ['commit_record', 'a2'],
++      ['file_diff', 'a1'],
++      ['file_diff', 'a2'],
++    ]);
++  });
++
++  it('gw=null → no-op（不抛）', () => {
++    expect(() => emitCommitCard(null, baseCommit, { agentId: 'a1', agentName: 'A' })).not.toThrow();
++    expect(() => emitFileDiffCards(null, baseDiffs, { agentId: 'a1', agentName: 'A' })).not.toThrow();
++  });
++
++  it('emitCommitCard 空 sha → 不 emit', () => {
++    const { gw, emitted } = makeGw();
++    emitCommitCard(gw, { ...baseCommit, sha: '' }, { agentId: 'a1', agentName: 'A' });
++    expect(emitted).toHaveLength(0);
++  });
++});
+diff --git a/server/src/__tests__/run-artifacts.test.ts b/server/src/__tests__/run-artifacts.test.ts
+new file mode 100644
+index 0000000..525fa0b
+--- /dev/null
++++ b/server/src/__tests__/run-artifacts.test.ts
+@@ -0,0 +1,304 @@
++// server/src/__tests__/run-artifacts.test.ts
++// 多产物登记（2026-11-07）— run_artifacts 独立产物表 + blueprint 捕获器。
++//
++// 动机：run-sessions 此前「last blueprint wins」（runs 表三字段只留最后一件
++// 产物），多产物 run 的其余产物在产物面板/项目产物里全部不可见。
++//
++// 覆盖四层：
++//   1. captureBlueprintArtifact 纯逻辑（多件登记/同名覆盖去重/空载荷跳过/主产物语义）
++//   2. storage/runs.ts run_artifacts 读写（幂等重登记/捕获序/deleteRun 级联/孤儿清理）
++//   3. GET /api/projects/:id/artifacts 多产物逐件展开 + 旧 run 三字段回落
++//   4. GET /api/runs 行内 artifacts 数组（additive，raw array 契约不破）
++import { describe, it, expect, beforeAll, afterAll } from 'vitest';
++import express from 'express';
++import request from 'supertest';
++import { mkdtempSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++
++import { captureBlueprintArtifact, type CapturedArtifact } from '../routes/run-sessions';
++
++let tmp: string;
++let origCwd: string;
++let sqlite: typeof import('../storage/sqlite');
++let runsStore: typeof import('../storage/runs');
++let projectsStore: typeof import('../storage/projects');
++let projectsRouter: typeof import('../routes/projects').default;
++let runsRouter: typeof import('../routes/runs').default;
++
++beforeAll(async () => {
++  // sqlite 数据文件落在 cwd/.shadowflow/ — 切到临时目录跑隔离库。
++  origCwd = process.cwd();
++  tmp = mkdtempSync(path.join(tmpdir(), 'sf-run-artifacts-'));
++  process.chdir(tmp);
++  sqlite = await import('../storage/sqlite');
++  sqlite._resetForTests();
++  runsStore = await import('../storage/runs');
++  projectsStore = await import('../storage/projects');
++  projectsRouter = (await import('../routes/projects')).default;
++  runsRouter = (await import('../routes/runs')).default;
++});
++
++afterAll(() => {
++  sqlite._resetForTests();
++  process.chdir(origCwd);
++  rmSync(tmp, { recursive: true, force: true });
++});
++
++function makeRecord(overrides: Partial<import('../storage/runs').RunRecord> = {}) {
++  return {
++    run_id: 'run-art1',
++    session_id: 'sess-art1',
++    goal: '生成团队蓝图与原型',
++    skill_name: 'agent-team-blueprint',
++    skill_display_name: 'Agent Team Blueprint',
++    artifact_type: 'yaml' as const,
++    artifact_filename: 'team_blueprint.yml',
++    artifact_url: '/projects/sess-art1/team_blueprint.yml',
++    status: 'completed' as const,
++    created_at: '2026-11-07T02:00:00Z',
++    completed_at: '2026-11-07T02:00:30Z',
++    project_dir: '.shadowflow/projects/sess-art1',
++    ...overrides,
++  };
++}
++
++// ── 1. captureBlueprintArtifact 纯逻辑 ──────────────────────────────────────
++
++describe('captureBlueprintArtifact（blueprint 事件捕获器）', () => {
++  it('多件产物逐件登记（不再 last-wins 丢失）', () => {
++    const captured: CapturedArtifact[] = [];
++    const e1 = captureBlueprintArtifact(captured, {
++      artifact_type: 'yaml',
++      filename: 'team_blueprint.yml',
++      artifact_url: '/projects/s1/team_blueprint.yml',
++    });
++    const e2 = captureBlueprintArtifact(captured, {
++      artifact_type: 'html',
++      filename: 'prototype.html',
++      artifact_url: '/projects/s1/prototype.html',
++    });
++    const e3 = captureBlueprintArtifact(captured, {
++      artifact_type: 'markdown',
++      filename: 'report.md',
++    });
++    expect(captured).toHaveLength(3);
++    expect(captured.map((a) => a.filename)).toEqual([
++      'team_blueprint.yml',
++      'prototype.html',
++      'report.md',
++    ]);
++    // 返回值 = 本次条目：调用方用最后一次维持「主产物」旧语义。
++    expect(e1?.type).toBe('yaml');
++    expect(e2?.type).toBe('html');
++    expect(e3?.url).toBeNull();
++  });
++
++  it('同名产物重复事件 → 覆盖既有行（后值补齐缺字段），不堆行', () => {
++    const captured: CapturedArtifact[] = [];
++    captureBlueprintArtifact(captured, { filename: 'a.html' });
++    captureBlueprintArtifact(captured, {
++      artifact_type: 'html',
++      filename: 'a.html',
++      artifact_url: '/projects/s1/a.html',
++    });
++    expect(captured).toHaveLength(1);
++    expect(captured[0]).toEqual({
++      type: 'html',
++      filename: 'a.html',
++      url: '/projects/s1/a.html',
++    });
++  });
++
++  it('空载荷（type/filename/url 全无）→ 不登记，返回 null', () => {
++    const captured: CapturedArtifact[] = [];
++    expect(captureBlueprintArtifact(captured, {})).toBeNull();
++    expect(captureBlueprintArtifact(captured, { filename: '', artifact_url: '' })).toBeNull();
++    expect(captured).toHaveLength(0);
++  });
++
++  it('非法 artifact_type 落 null 但产物仍登记（filename 为准）', () => {
++    const captured: CapturedArtifact[] = [];
++    const e = captureBlueprintArtifact(captured, {
++      artifact_type: 'exe/unknown',
++      filename: 'x.bin',
++    });
++    expect(e?.type).toBeNull();
++    expect(captured).toHaveLength(1);
++  });
++});
++
++// ── 2. storage/runs.ts run_artifacts 读写 ───────────────────────────────────
++
++describe('run_artifacts 存储', () => {
++  it('saveRunArtifacts/listRunArtifacts 按捕获序往返；重复登记幂等', () => {
++    runsStore.saveRun(makeRecord());
++    runsStore.saveRunArtifacts('run-art1', [
++      { artifact_type: 'yaml', artifact_filename: 'a.yml', artifact_url: '/p/a.yml' },
++      { artifact_type: 'html', artifact_filename: 'b.html', artifact_url: '/p/b.html' },
++      { artifact_type: 'markdown', artifact_filename: 'c.md', artifact_url: null },
++    ]);
++    expect(runsStore.listRunArtifacts('run-art1')).toEqual([
++      { artifact_type: 'yaml', artifact_filename: 'a.yml', artifact_url: '/p/a.yml' },
++      { artifact_type: 'html', artifact_filename: 'b.html', artifact_url: '/p/b.html' },
++      { artifact_type: 'markdown', artifact_filename: 'c.md', artifact_url: null },
++    ]);
++    // 幂等：回调触发两次/重放 → 全量重登记，不堆行。
++    runsStore.saveRunArtifacts('run-art1', [
++      { artifact_type: 'yaml', artifact_filename: 'a.yml', artifact_url: '/p/a.yml' },
++    ]);
++    expect(runsStore.listRunArtifacts('run-art1')).toHaveLength(1);
++  });
++
++  it('deleteRun 级联清掉登记行', () => {
++    runsStore.saveRun(makeRecord({ run_id: 'run-del', session_id: 'sess-del' }));
++    runsStore.saveRunArtifacts('run-del', [
++      { artifact_type: 'yaml', artifact_filename: 'd.yml', artifact_url: null },
++    ]);
++    expect(runsStore.deleteRun('run-del')).toBe(true);
++    expect(runsStore.listRunArtifacts('run-del')).toHaveLength(0);
++  });
++
++  it('saveRun 落库时清掉被 trim 删掉的 run 的孤儿登记行', () => {
++    runsStore.saveRun(makeRecord({ run_id: 'run-orphan', session_id: 'sess-orphan' }));
++    runsStore.saveRunArtifacts('run-orphan', [
++      { artifact_type: 'yaml', artifact_filename: 'o.yml', artifact_url: null },
++    ]);
++    // 模拟 trim：run 行被裁掉但登记行还在（run_artifacts 不挂 FK）。
++    sqlite.getDb().prepare(`DELETE FROM runs WHERE run_id = ?`).run('run-orphan');
++    // 任意一次 saveRun 落库都会顺手清孤儿。
++    runsStore.saveRun(makeRecord({ run_id: 'run-trim-trigger', session_id: 'sess-tt' }));
++    expect(runsStore.listRunArtifacts('run-orphan')).toHaveLength(0);
++  });
++
++  it('listAllRunArtifacts 按 run 分组', () => {
++    runsStore.saveRun(makeRecord({ run_id: 'run-g1', session_id: 'sess-g1' }));
++    runsStore.saveRun(makeRecord({ run_id: 'run-g2', session_id: 'sess-g2' }));
++    runsStore.saveRunArtifacts('run-g1', [
++      { artifact_type: 'yaml', artifact_filename: 'g1.yml', artifact_url: null },
++      { artifact_type: 'html', artifact_filename: 'g1.html', artifact_url: null },
++    ]);
++    runsStore.saveRunArtifacts('run-g2', [
++      { artifact_type: 'markdown', artifact_filename: 'g2.md', artifact_url: null },
++    ]);
++    const byRun = runsStore.listAllRunArtifacts();
++    expect(byRun.get('run-g1')?.map((a) => a.artifact_filename)).toEqual(['g1.yml', 'g1.html']);
++    expect(byRun.get('run-g2')?.map((a) => a.artifact_filename)).toEqual(['g2.md']);
++  });
++});
++
++// ── 3. GET /api/projects/:id/artifacts ──────────────────────────────────────
++
++function appWith(routers: Array<{ base: string; router: express.Router }>) {
++  const a = express();
++  a.use(express.json());
++  for (const r of routers) a.use(r.base, r.router);
++  return a;
++}
++
++describe('GET /api/projects/:id/artifacts（多产物逐件展开）', () => {
++  it('新式 run：登记 3 件 → 3 行（artifact_id=run#seq），不再只显示最后一件', async () => {
++    const p = projectsStore.createProject({ name: 'multi', workspace_path: path.join(tmp, 'pm') });
++    runsStore.saveRun(
++      makeRecord({ run_id: 'run-m1', session_id: 'sess-m1' }),
++      { project_id: p.project_id },
++    );
++    runsStore.saveRunArtifacts('run-m1', [
++      { artifact_type: 'yaml', artifact_filename: 'a.yml', artifact_url: '/projects/sess-m1/a.yml' },
++      { artifact_type: 'html', artifact_filename: 'b.html', artifact_url: '/projects/sess-m1/b.html' },
++      { artifact_type: 'markdown', artifact_filename: 'c.md', artifact_url: null },
++    ]);
++    const res = await request(appWith([{ base: '/api/projects', router: projectsRouter }]))
++      .get(`/api/projects/${p.project_id}/artifacts`);
++    expect(res.status).toBe(200);
++    const rows = res.body as Array<{
++      artifact_id: string;
++      title: string;
++      file_type: string;
++      download_url: string | null;
++      preview_url: string | null;
++      run_id: string;
++    }>;
++    expect(rows).toHaveLength(3);
++    expect(rows.map((r) => r.artifact_id)).toEqual(['run-m1#0', 'run-m1#1', 'run-m1#2']);
++    expect(rows.map((r) => r.title)).toEqual(['a.yml', 'b.html', 'c.md']);
++    expect(rows.every((r) => r.run_id === 'run-m1')).toBe(true);
++    // html → preview_url 有值；markdown → null（口径与旧行为一致）。
++    expect(rows[1].file_type).toBe('html');
++    expect(rows[1].preview_url).toBe('/projects/sess-m1/b.html');
++    expect(rows[2].file_type).toBe('md');
++    expect(rows[2].preview_url).toBeNull();
++  });
++
++  it('旧式 run（无登记行）→ 回落 runs 三字段单行，artifact_id 保持 run_id', async () => {
++    const p = projectsStore.createProject({ name: 'legacy', workspace_path: path.join(tmp, 'pl') });
++    runsStore.saveRun(
++      makeRecord({ run_id: 'run-l1', session_id: 'sess-l1' }),
++      { project_id: p.project_id },
++    );
++    const res = await request(appWith([{ base: '/api/projects', router: projectsRouter }]))
++      .get(`/api/projects/${p.project_id}/artifacts`);
++    expect(res.status).toBe(200);
++    const rows = res.body as Array<{ artifact_id: string; title: string; run_id: string }>;
++    expect(rows).toHaveLength(1);
++    expect(rows[0].artifact_id).toBe('run-l1');
++    expect(rows[0].title).toBe('team_blueprint.yml');
++    expect(rows[0].run_id).toBe('run-l1');
++  });
++
++  it('无产物 run 不出行；登记空 + 三字段为空也不出行', async () => {
++    const p = projectsStore.createProject({ name: 'empty', workspace_path: path.join(tmp, 'pe') });
++    runsStore.saveRun(
++      makeRecord({
++        run_id: 'run-e1',
++        session_id: 'sess-e1',
++        artifact_type: null,
++        artifact_filename: null,
++        artifact_url: null,
++      }),
++      { project_id: p.project_id },
++    );
++    runsStore.saveRunArtifacts('run-e1', []);
++    const res = await request(appWith([{ base: '/api/projects', router: projectsRouter }]))
++      .get(`/api/projects/${p.project_id}/artifacts`);
++    expect(res.status).toBe(200);
++    expect(res.body).toEqual([]);
++  });
++});
++
++// ── 4. GET /api/runs（行内 artifacts，additive）──────────────────────────────
++
++describe('GET /api/runs 行内 artifacts 数组', () => {
++  it('登记全集内嵌；旧 run 给空数组；raw array 契约保持', async () => {
++    // 真实链路：runs 三字段 = 主产物（捕获的最后一件 r1.html），全集在 artifacts。
++    runsStore.saveRun(
++      makeRecord({
++        run_id: 'run-r1',
++        session_id: 'sess-r1',
++        artifact_type: 'html',
++        artifact_filename: 'r1.html',
++        artifact_url: '/p/r1.html',
++      }),
++    );
++    runsStore.saveRunArtifacts('run-r1', [
++      { artifact_type: 'yaml', artifact_filename: 'r1.yml', artifact_url: '/p/r1.yml' },
++      { artifact_type: 'html', artifact_filename: 'r1.html', artifact_url: '/p/r1.html' },
++    ]);
++    runsStore.saveRun(makeRecord({ run_id: 'run-r2', session_id: 'sess-r2' }));
++
++    const res = await request(appWith([{ base: '/api/runs', router: runsRouter }])).get('/api/runs');
++    expect(res.status).toBe(200);
++    expect(Array.isArray(res.body)).toBe(true);
++    const rows = res.body as Array<{
++      run_id: string;
++      artifact_filename: string | null;
++      artifacts: Array<{ artifact_type: string | null; artifact_filename: string | null; artifact_url: string | null }>;
++    }>;
++    const r1 = rows.find((r) => r.run_id === 'run-r1');
++    const r2 = rows.find((r) => r.run_id === 'run-r2');
++    expect(r1?.artifacts.map((a) => a.artifact_filename)).toEqual(['r1.yml', 'r1.html']);
++    // 主产物三字段仍是最后一件（旧行为），全集在 artifacts 里。
++    expect(r1?.artifact_filename).toBe('r1.html');
++    expect(r2?.artifacts).toEqual([]);
++  });
++});
+diff --git a/server/src/lib/contracts.ts b/server/src/lib/contracts.ts
+index 784947b..35d36ea 100644
+--- a/server/src/lib/contracts.ts
++++ b/server/src/lib/contracts.ts
+@@ -338,6 +338,10 @@ export type TimelineMessage =
+       files?: CommitFileEntry[];
+       /** Optional external link (e.g. web UI commit page). */
+       url?: string;
++      /** 2026-11-07 检查器产出归属 — 提交者 agent（additive；无归属 = 老数据 /
++       *  编排者合并提交，检查器对无归属卡不进流）。 */
++      agent_id?: string;
++      agent_name?: string;
+     })
+   | (TimelineMessageBase & {
+       kind: 'file_diff';
+@@ -347,6 +351,9 @@ export type TimelineMessage =
+       added: number;
+       removed: number;
+       lines: DiffLine[];
++      /** 2026-11-07 检查器产出归属 — 同 commit_record.agent_id（与其成对出现）。 */
++      agent_id?: string;
++      agent_name?: string;
+     })
+   | (TimelineMessageBase & {
+       kind: 'table_panel';
+diff --git a/server/src/routes/groups-chat.ts b/server/src/routes/groups-chat.ts
+index 98a0a9b..e9bb81e 100644
+--- a/server/src/routes/groups-chat.ts
++++ b/server/src/routes/groups-chat.ts
+@@ -610,13 +610,16 @@ export function emitIntentCard(gw: GwLike, input: IntentCardInput): void {
+   }
+ }
+ 
+-/** commit_record 卡 — agent 提交 / 编排者合并提交共用。 */
+-function emitCommitCard(gw: GwLike, c: {
++/** commit_record 卡 — agent 提交 / 编排者合并提交共用。
++ *  2026-11-07 检查器产出归属 — who 可选：agent 自己的提交带 agent_id/agent_name
++ *  （检查器按 agent 筛产出）；编排者合并提交不传 = 无归属（不进单 agent 流）。 */
++export function emitCommitCard(gw: ToolGw, c: {
+   repo: string; sha: string; short_sha: string; message: string; author: string;
+   date?: string; files_changed: number; insertions: number; deletions: number;
+   files?: WorktreeCommit['files'];
+-}): void {
++}, who?: ToolOwner): void {
+   if (!gw || !c.sha) return;
++  const attribution = who ? { agent_id: who.agentId, agent_name: who.agentName } : {};
+   gw.emitMessage({
+     id: gw.nextId(),
+     kind: 'commit_record',
+@@ -632,12 +635,15 @@ function emitCommitCard(gw: GwLike, c: {
+     deletions: c.deletions,
+     ...(c.date ? { date: c.date } : {}),
+     ...(c.files && c.files.length > 0 ? { files: c.files } : {}),
++    ...attribution,
+   });
+ }
+ 
+-/** file_diff 卡（每个变更文件一张，git-introspect 已限量截断）。 */
+-function emitFileDiffCards(gw: GwLike, diffs: GitFileDiff[]): void {
++/** file_diff 卡（每个变更文件一张，git-introspect 已限量截断）。
++ *  2026-11-07 — who 同 emitCommitCard（与 commit_record 成对归属）。 */
++export function emitFileDiffCards(gw: ToolGw, diffs: GitFileDiff[], who?: ToolOwner): void {
+   if (!gw) return;
++  const attribution = who ? { agent_id: who.agentId, agent_name: who.agentName } : {};
+   for (const fd of diffs) {
+     gw.emitMessage({
+       id: gw.nextId(),
+@@ -649,6 +655,7 @@ function emitFileDiffCards(gw: GwLike, diffs: GitFileDiff[]): void {
+       removed: fd.removed,
+       lines: fd.lines,
+       ...(fd.language ? { language: fd.language } : {}),
++      ...attribution,
+     });
+   }
+ }
+@@ -657,18 +664,18 @@ function emitFileDiffCards(gw: GwLike, diffs: GitFileDiff[]): void {
+ async function commitAndEvidence(
+   gw: GwLike,
+   wt: PreparedWorktree,
+-  agentName: string,
++  who: ToolOwner,
+   taskTitle: string,
+ ): Promise<void> {
+   try {
+     const commit = await commitWorktree(
+       wt.dir,
+-      `[sf] ${agentName}: ${taskTitle.slice(0, 60)}`,
+-      agentName,
++      `[sf] ${who.agentName}: ${taskTitle.slice(0, 60)}`,
++      who.agentName,
+     );
+     if (!commit?.sha) return;
+     emitCommitCard(gw, {
+-      repo: agentName,
++      repo: who.agentName,
+       sha: commit.sha,
+       short_sha: commit.short_sha,
+       message: commit.message,
+@@ -678,9 +685,9 @@ async function commitAndEvidence(
+       insertions: commit.insertions,
+       deletions: commit.deletions,
+       files: commit.files,
+-    });
++    }, who);
+     const ev = await inspectGitRun(wt.dir, wt.baseSha, undefined);
+-    if (ev) emitFileDiffCards(gw, ev.fileDiffs);
++    if (ev) emitFileDiffCards(gw, ev.fileDiffs, who);
+   } catch (e) {
+     console.warn('[groups-chat] worktree commit/evidence failed (non-fatal):', e);
+   }
+@@ -915,6 +922,9 @@ async function runFanout(
+                 id: `node:${id}`,
+                 title: taskByAgent.get(id)?.title ?? rosterName(id),
+                 assignee: rosterName(id),
++                // U0 绑角色 — 行归属 agent_id 真源（检查器按行筛「含它的任务行」；
++                // 老数据回落行 id `node:<agentId>` 同样可判归属）。
++                agent_id: id,
+                 status: 'pending',
+                 batch: li + 1,
+               });
+@@ -1152,7 +1162,7 @@ async function runFanout(
+             // Polynoia MERGE 前半 — 干完即提交 worktree 产物 + 证据卡
+             // （commit_record / file_diff）；无 worktree 或干净树 → 静默跳过。
+             if (!errMsg && wt) {
+-              await commitAndEvidence(gw, wt, name, task?.title ?? userPrompt);
++              await commitAndEvidence(gw, wt, { agentId: agentId, agentName: name }, task?.title ?? userPrompt);
+             }
+             // 2026-11-04 思考剥离 — 与串行路径同款：<sf:thinking> 段不进最终回复。
+             return { text: stripThinking(buf), error: errMsg || undefined };
+@@ -1441,7 +1451,7 @@ async function runFanout(
+       });
+       // 串行路径同样「干完即提交」— worktree 产物 + 证据卡。
+       if (wt) {
+-        await commitAndEvidence(gw, wt, agentName, prompt);
++        await commitAndEvidence(gw, wt, { agentId: agentId, agentName: agentName }, prompt);
+       }
+     }
+     // 仅当注册表里仍是本轮 controller 时才删（避免误删后来者；DAG 路径 finally 同款）。
+diff --git a/server/src/routes/projects.ts b/server/src/routes/projects.ts
+index 7193de5..6c293d9 100644
+--- a/server/src/routes/projects.ts
++++ b/server/src/routes/projects.ts
+@@ -119,9 +119,16 @@ router.delete('/:id', (req: Request, res: Response) => {
+ /**
+  * GET /api/projects/:id/artifacts
+  *
+- * Returns all runs for the project that produced an artifact (artifact_filename IS NOT NULL).
++ * Returns every registered artifact of the project's runs.
++ *
++ * 多产物登记（2026-11-07）：一 run 多件产物时逐件返回一行（此前 runs 三
++ * 字段「last blueprint wins」，一个 run 只能看到最后一件）。数据源两级：
++ *   1. run_artifacts 独立登记表（新）→ 每件产物一行，artifact_id = run_id#seq；
++ *   2. 无登记行的 run 回落 runs.artifact_* 三字段（旧数据兼容）→ 单行，
++ *      artifact_id = run_id（保持旧值，消费侧 key/链接不断）。
++ *
+  * Response shape per item:
+- *   artifact_id    — run_id
++ *   artifact_id    — run_id#seq（多产物）或 run_id（旧单产物）
+  *   title          — artifact_filename (basename) or goal as fallback
+  *   file_type      — artifact_type ('html'|'md'|'yaml'|'pdf')
+  *   generated_at   — completed_at
+@@ -146,28 +153,72 @@ router.get('/:id/artifacts', (req: Request, res: Response) => {
+     completed_at: string;
+   }
+ 
+-  const rows = getDb()
++  interface RunArtifactRow {
++    run_id: string;
++    seq: number;
++    artifact_type: string | null;
++    artifact_filename: string | null;
++    artifact_url: string | null;
++  }
++
++  const db = getDb();
++  const runRows = db
+     .prepare(
+       `SELECT run_id, goal, artifact_type, artifact_filename, artifact_url, completed_at
+        FROM runs
+-       WHERE project_id = ? AND artifact_filename IS NOT NULL
++       WHERE project_id = ?
+        ORDER BY completed_at DESC`,
+     )
+     .all(req.params.id) as ArtifactRow[];
+ 
+-  const artifacts = rows.map((r) => {
+-    const ft = (r.artifact_type ?? 'md').toLowerCase().replace('markdown', 'md');
++  // run_artifacts 登记行（join runs 保证项目归属；seq ASC = 捕获序）。
++  const artifactRows = db
++    .prepare(
++      `SELECT ra.run_id, ra.seq, ra.artifact_type, ra.artifact_filename, ra.artifact_url
++       FROM run_artifacts ra
++       JOIN runs r ON r.run_id = ra.run_id
++       WHERE r.project_id = ?
++       ORDER BY ra.seq ASC`,
++    )
++    .all(req.params.id) as RunArtifactRow[];
++  const byRun = new Map<string, RunArtifactRow[]>();
++  for (const a of artifactRows) {
++    const list = byRun.get(a.run_id) ?? [];
++    list.push(a);
++    byRun.set(a.run_id, list);
++  }
++
++  const toRow = (
++    run: ArtifactRow,
++    artifactId: string,
++    artifactType: string | null,
++    filename: string | null,
++    url: string | null,
++  ) => {
++    const ft = (artifactType ?? 'md').toLowerCase().replace('markdown', 'md');
+     const isHtml = ft === 'html';
+     return {
+-      artifact_id: r.run_id,
+-      title: r.artifact_filename ?? r.goal,
++      artifact_id: artifactId,
++      title: filename ?? run.goal,
+       file_type: ft,
+-      generated_at: r.completed_at,
+-      download_url: r.artifact_url ?? null,
+-      preview_url: isHtml ? (r.artifact_url ?? null) : null,
++      generated_at: run.completed_at,
++      download_url: url ?? null,
++      preview_url: isHtml ? (url ?? null) : null,
+       size_bytes: null,
+-      run_id: r.run_id,
++      run_id: run.run_id,
+     };
++  };
++
++  const artifacts = runRows.flatMap((r) => {
++    const registered = byRun.get(r.run_id);
++    if (registered && registered.length > 0) {
++      // 新式 run：登记了什么就展示什么（含 runs 三字段之外的产物）。
++      return registered.map((a) =>
++        toRow(r, `${r.run_id}#${a.seq}`, a.artifact_type, a.artifact_filename, a.artifact_url),
++      );
++    }
++    // 旧式 run：无登记行 → 回落 runs 三字段单件（保持旧行为/旧 artifact_id）。
++    return r.artifact_filename ? [toRow(r, r.run_id, r.artifact_type, r.artifact_filename, r.artifact_url)] : [];
+   });
+ 
+   res.json(artifacts);
+diff --git a/server/src/routes/run-sessions.ts b/server/src/routes/run-sessions.ts
+index 8f3653f..a6e8fba 100644
+--- a/server/src/routes/run-sessions.ts
++++ b/server/src/routes/run-sessions.ts
+@@ -33,7 +33,7 @@ import { toolApprovals, type PermissionDecision } from '../lib/tool-approval';
+ // in shape from the SkillDropdown UI; both call sites now agree on which
+ // goal text patterns are recognised as inline-skill tokens.
+ import { parseSkillToken } from '../lib/skill-token';
+-import { saveRun, type ArtifactType } from '../storage/runs';
++import { saveRun, saveRunArtifacts, type ArtifactType } from '../storage/runs';
+ import { getSetting } from '../storage/settings';
+ // 经验记忆自动沉淀（2026-11-05，整合 OPC-OS PR#3 memory.py 设计）：
+ // run 失败→教训、用户中断→偏好，全部从已落库事实挖、零 LLM 调用。
+@@ -874,6 +874,44 @@ function coerceArtifactType(raw: unknown): ArtifactType | null {
+     : null;
+ }
+ 
++// ── 多产物登记（2026-11-07）— blueprint 事件捕获器 ──────────────────────────
++// 此前「last blueprint wins」：一个 run 只留最后一件产物（runs 表三字段），
++// 其余产物在产物面板/项目产物里全部不可见。现在每件 blueprint 产物都进
++// captured 列表（storage/runs.ts run_artifacts 表持久化）。
++// 导出为纯函数供 __tests__/run-artifacts.test.ts 直测。
++
++/** 一件捕获到的产物（= storage/runs.ts RunArtifact 的运行时形状）。 */
++export interface CapturedArtifact {
++  type: ArtifactType | null;
++  filename: string | null;
++  url: string | null;
++}
++
++/**
++ * captureBlueprintArtifact — 把一条 blueprint 事件的载荷登记进 captured。
++ *
++ * - 载荷全空（type/filename/url 均无）→ 不登记，返回 null。
++ * - 身份 = filename ?? url：同名产物的重复事件**覆盖**既有行（后值补齐
++ *   缺字段，如先 filename 后带 url 的补发），不产生重复行。
++ * - 返回本次的条目（无论新增还是覆盖）——调用方用它维持「最后一件」的
++ *   主产物语义（critique/回执沿用旧行为）。
++ */
++export function captureBlueprintArtifact(
++  captured: CapturedArtifact[],
++  data: { artifact_type?: unknown; filename?: unknown; artifact_url?: unknown },
++): CapturedArtifact | null {
++  const type = coerceArtifactType(data.artifact_type);
++  const filename = typeof data.filename === 'string' && data.filename ? data.filename : null;
++  const url = typeof data.artifact_url === 'string' && data.artifact_url ? data.artifact_url : null;
++  if (!type && !filename && !url) return null;
++  const entry: CapturedArtifact = { type, filename, url };
++  const key = filename ?? url;
++  const idx = key ? captured.findIndex((a) => (a.filename ?? a.url) === key) : -1;
++  if (idx >= 0) captured[idx] = entry;
++  else captured.push(entry);
++  return entry;
++}
++
+ // ── GET /api/run-sessions — M3 三栏融合 ──────────────────────────────────────
+ // 轻量列表：右栏「工作区」tab 按 conversation_id 或 group_id（B1 互链换算）
+ // 查群关联的 run。status 来自 runBus（内存）；重启后无活跃 run 回落 'idle'。
+@@ -1699,6 +1737,10 @@ router.get('/:id/stream', async (req: Request, res: Response) => {
+   const toolCallProjector = createToolCallProjector({ idSeed: id });
+ 
+   // Story 15.8 — capture run outcome for persistence after generator drains.
++  // 多产物登记（2026-11-07）：capturedArtifacts 登记本 run 的**每一件** blueprint
++  // 产物（持久化到 run_artifacts 表）；artifactInfo 保留「最后一件 = 主产物」
++  // 语义，critique / saveRun 三字段 / 回执摘要的单件行为不变。
++  const capturedArtifacts: CapturedArtifact[] = [];
+   let artifactInfo: {
+     type: ArtifactType | null;
+     filename: string | null;
+@@ -2234,19 +2276,18 @@ router.get('/:id/stream', async (req: Request, res: Response) => {
+         console.error(`[run-sessions] tool-call projection error on event=${event}:`, toolCallErr);
+       }
+ 
+-      // Capture latest artifact info (last blueprint wins — usually only one).
++      // 多产物登记（2026-11-07）— 每件 blueprint 产物都进 capturedArtifacts
++      // （同名覆盖去重）；artifactInfo = 最后一件（主产物，沿用旧语义）。
+       if (event === 'blueprint' && data && typeof data === 'object') {
+-        const d = data as {
+-          artifact_type?: unknown;
+-          filename?: unknown;
+-          artifact_url?: unknown;
+-        };
+-        const type = coerceArtifactType(d.artifact_type);
+-        const filename = typeof d.filename === 'string' ? d.filename : null;
+-        const url = typeof d.artifact_url === 'string' ? d.artifact_url : null;
+-        if (type || filename || url) {
+-          artifactInfo = { type, filename, url };
+-        }
++        const entry = captureBlueprintArtifact(
++          capturedArtifacts,
++          data as {
++            artifact_type?: unknown;
++            filename?: unknown;
++            artifact_url?: unknown;
++          },
++        );
++        if (entry) artifactInfo = entry;
+       } else if (event === 'error') {
+         sawError = true;
+         // Story 15.29 — capture error message for the assistant message.
+@@ -2474,6 +2515,17 @@ router.get('/:id/stream', async (req: Request, res: Response) => {
+               : null,
+           },
+         );
++        // 多产物登记（2026-11-07）— 本 run 捕获的每件 blueprint 产物独立
++        // 落 run_artifacts（幂等全量重登记）。runs 三字段仍是主产物（最后
++        // 一件）——上面 saveRun 刚写完，这里补全其余产物/同名去重后的全集。
++        saveRunArtifacts(
++          persistedRunId,
++          capturedArtifacts.map((a) => ({
++            artifact_type: a.type,
++            artifact_filename: a.filename,
++            artifact_url: a.url,
++          })),
++        );
+       } catch (persistErr) {
+         // Don't fail the response just because we couldn't persist the
+         // run record — the SSE stream is already over. Log and move on.
+@@ -2492,7 +2544,14 @@ router.get('/:id/stream', async (req: Request, res: Response) => {
+     // Writing failure NEVER reaches the client (try/catch + console.error).
+     if (session.conversation_id) {
+       let summary: string;
+-      if (artifactInfo.filename) {
++      // 多产物登记（2026-11-07）— 多件产物在回执里全部点名（此前只提最后
++      // 一件）。单件/无 filename 保持旧文案，链路优先级不变。
++      const artifactNames = capturedArtifacts
++        .map((a) => a.filename ?? a.url)
++        .filter((n): n is string => typeof n === 'string' && !!n);
++      if (artifactNames.length > 1) {
++        summary = `[Generated artifacts: ${artifactNames.join(', ')}]`;
++      } else if (artifactInfo.filename) {
+         summary = `[Generated artifact: ${artifactInfo.filename}]`;
+       } else if (stripLeakedSseFrames(collectedStreamText).trim().length > 0) {
+         // P2 — control-frame channel isolation (root-cure plan §5). NEVER
+diff --git a/server/src/routes/runs.ts b/server/src/routes/runs.ts
+index 220354c..bae6ee1 100644
+--- a/server/src/routes/runs.ts
++++ b/server/src/routes/runs.ts
+@@ -15,7 +15,7 @@
+  */
+ 
+ import { Router, Request, Response, NextFunction } from 'express';
+-import { listRuns, deleteRun } from '../storage/runs';
++import { listRuns, listAllRunArtifacts, deleteRun } from '../storage/runs';
+ import { getRunReplay } from './run-sessions';
+ import {
+   buildDaemonRunGraph,
+@@ -27,18 +27,27 @@ const router = Router();
+ // GET /runs → RunRecord[] (raw array, NOT envelope — see contract note above)
+ // ?limit= (frontend src/api/runs.ts sends it): parse int, clamp 1..200;
+ // absent/invalid → full list (previous behavior, table is already MAX_RUNS-capped).
++//
++// 多产物登记（2026-11-07）— 行内附加 `artifacts` 数组（additive）：该 run
++// 登记的全部产物按捕获序；无登记行的旧 run 给空数组（消费侧回落
++// artifact_* 三字段主产物，形状不破坏 15.1 raw array 契约）。
+ router.get('/', (req: Request, res: Response) => {
+   const runs = listRuns();
++  const artifactsByRun = listAllRunArtifacts();
++  const withArtifacts = runs.map((r) => ({
++    ...r,
++    artifacts: artifactsByRun.get(r.run_id) ?? [],
++  }));
+   const raw = req.query.limit;
+   if (typeof raw === 'string' && raw.trim() !== '') {
+     const n = parseInt(raw, 10);
+     if (!Number.isNaN(n)) {
+       const limit = Math.min(Math.max(n, 1), 200);
+-      res.json(runs.slice(0, limit));
++      res.json(withArtifacts.slice(0, limit));
+       return;
+     }
+   }
+-  res.json(runs);
++  res.json(withArtifacts);
+ });
+ 
+ // ── L6（GAP.md:13）— Node daemon run 的投影端点 ─────────────────────────────
+diff --git a/server/src/storage/runs.ts b/server/src/storage/runs.ts
+index 9c8259e..17b34ca 100644
+--- a/server/src/storage/runs.ts
++++ b/server/src/storage/runs.ts
+@@ -135,13 +135,90 @@ export function saveRun(record: RunRecord, linkage?: RunLinkage): void {
+          SELECT completed_at FROM runs ORDER BY completed_at DESC LIMIT 1 OFFSET ?
+        )`,
+     ).run(MAX_RUNS - 1);
++
++    // 多产物登记（2026-11-07）— 清掉被 trim 掉的 run 留下的孤儿产物行
++    // （run_artifacts 不挂 FK，需手动同步）。
++    db.prepare(
++      `DELETE FROM run_artifacts WHERE run_id NOT IN (SELECT run_id FROM runs)`,
++    ).run();
+   });
+   tx();
+ }
+ 
++// ── 多产物登记（2026-11-07）─────────────────────────────────────────────────
++// run_artifacts 表的读写。动机见 storage/sqlite.ts 内 DDL 注释：
++// runs 三字段只留「主产物」（最后一件，向后兼容），每件 blueprint 产物
++// 在本表按捕获序独立登记。
++
++/** 一件登记产物（不含 run_id/seq —— 由容器决定）。 */
++export interface RunArtifact {
++  artifact_type: ArtifactType | null;
++  artifact_filename: string | null;
++  artifact_url: string | null;
++}
++
++/**
++ * saveRunArtifacts — 全量重登记（幂等）：先清空该 run 的旧行，再按传入序
++ * （seq = 数组下标）逐件插入。重复调用（回调触发两次/重放）不会堆行。
++ * 空数组 = 清空登记（合法：run 可能没有产出任何产物）。
++ */
++export function saveRunArtifacts(runId: string, artifacts: RunArtifact[]): void {
++  const db = getDb();
++  const tx = db.transaction(() => {
++    db.prepare(`DELETE FROM run_artifacts WHERE run_id = ?`).run(runId);
++    const ins = db.prepare(
++      `INSERT INTO run_artifacts
++         (run_id, seq, artifact_type, artifact_filename, artifact_url, created_at)
++       VALUES (?, ?, ?, ?, ?, ?)`,
++    );
++    const now = new Date().toISOString();
++    artifacts.forEach((a, seq) => {
++      ins.run(runId, seq, a.artifact_type, a.artifact_filename, a.artifact_url, now);
++    });
++  });
++  tx();
++}
++
++/** listRunArtifacts — 该 run 登记的全部产物，按捕获序（seq ASC）。 */
++export function listRunArtifacts(runId: string): RunArtifact[] {
++  const rows = getDb()
++    .prepare(
++      `SELECT artifact_type, artifact_filename, artifact_url
++       FROM run_artifacts WHERE run_id = ? ORDER BY seq ASC`,
++    )
++    .all(runId) as RunArtifact[];
++  return rows;
++}
++
++/** listAllRunArtifacts — 全表按 run 分组（GET /api/runs 行内嵌 artifacts 用）。 */
++export function listAllRunArtifacts(): Map<string, RunArtifact[]> {
++  const rows = getDb()
++    .prepare(
++      `SELECT run_id, artifact_type, artifact_filename, artifact_url
++       FROM run_artifacts ORDER BY run_id, seq ASC`,
++    )
++    .all() as Array<RunArtifact & { run_id: string }>;
++  const byRun = new Map<string, RunArtifact[]>();
++  for (const r of rows) {
++    const list = byRun.get(r.run_id) ?? [];
++    list.push({
++      artifact_type: r.artifact_type,
++      artifact_filename: r.artifact_filename,
++      artifact_url: r.artifact_url,
++    });
++    byRun.set(r.run_id, list);
++  }
++  return byRun;
++}
++
+ export function deleteRun(runId: string): boolean {
+-  const result = getDb().prepare(`DELETE FROM runs WHERE run_id = ?`).run(runId);
+-  return result.changes > 0;
++  const db = getDb();
++  const tx = db.transaction(() => {
++    db.prepare(`DELETE FROM run_artifacts WHERE run_id = ?`).run(runId);
++    const result = db.prepare(`DELETE FROM runs WHERE run_id = ?`).run(runId);
++    return result.changes > 0;
++  });
++  return tx() as boolean;
+ }
+ 
+ /**
+diff --git a/server/src/storage/sqlite.ts b/server/src/storage/sqlite.ts
+index e65f46d..2ced342 100644
+--- a/server/src/storage/sqlite.ts
++++ b/server/src/storage/sqlite.ts
+@@ -271,6 +271,25 @@ export function getDb(): Database.Database {
+   CREATE INDEX IF NOT EXISTS idx_memory_profile_events
+     ON memory_profile_events(subject_id, key, id);`);
+ 
++  // 多产物登记（2026-11-07）— run_artifacts：一 run 多产物的独立登记表。
++  // 动机：run-sessions 此前「last blueprint wins」（runs 表三字段只留最后一件
++  // 产物），多产物 run 的其余产物在产物面板/项目产物里全部不可见。
++  // 约定：runs.artifact_type/filename/url 三字段保留 = 主产物（向后兼容），
++  // 本表按捕获序（seq）登记每一件 blueprint 产物。
++  // 不挂 FOREIGN KEY：saveRun 用 INSERT OR REPLACE（PK 冲突先删后插），
++  // 挂 FK 会级联清掉子行——改为 deleteRun/saveRun 清理时手动删孤儿行。
++  db.exec(`CREATE TABLE IF NOT EXISTS run_artifacts (
++    id INTEGER PRIMARY KEY AUTOINCREMENT,
++    run_id TEXT NOT NULL,
++    seq INTEGER NOT NULL,
++    artifact_type TEXT,
++    artifact_filename TEXT,
++    artifact_url TEXT,
++    created_at TEXT NOT NULL,
++    UNIQUE(run_id, seq)
++  );
++  CREATE INDEX IF NOT EXISTS idx_run_artifacts_run ON run_artifacts(run_id, seq);`);
++
+   _db = db;
+   _initialized = true;
+   console.log(`[sqlite] db ${dbExisted ? 'loaded' : 'initialized'} at ${file}`);

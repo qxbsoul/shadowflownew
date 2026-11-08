@@ -1,0 +1,70 @@
+
+[1m  ShadowFlow Backend Dev[0m
+  ────────────────────────────────────────────
+  [36mNode 网关[0m  http://localhost:8002/health
+  [36mPython API[0m  http://localhost:8000/docs
+  [2mCtrl+C 停止全部服务[0m
+
+[2m  [py] D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\.venv\Scripts\python.exe[0m
+[2m  [gw] tsx watch server/src/index.ts[0m
+
+[34m[py][0m [33mINFO:     Will watch for changes in these directories: ['D:\\KimiData\\kimi\\tasks\\2026-11-07\\00-53-34-e44badec\\ShadowFlow'][0m
+[34m[py][0m [33mINFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)[0m
+[34m[py][0m [33mINFO:     Started reloader process [16808] using StatReload[0m
+[34m[py][0m [33mINFO:     Started server process [15204][0m
+[34m[py][0m [33mINFO:     Waiting for application startup.[0m
+[34m[py][0m [33mShadowFlow starting without server-side keys: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY. UI will prompt the user to paste keys into localStorage (BYOK).[0m
+[34m[py][0m [33mShadowFlow: agent 'shadowsoul' unavailable ('shadow' not found in PATH). Templates using this provider will degrade to fallback executor.[0m
+[34m[py][0m [33mShadowFlow: agent 'hermes' unavailable ('hermes' not found in PATH). Templates using this provider will degrade to fallback executor.[0m
+[34m[py][0m [33mShadowFlow: agent 'openclaw' unavailable ('openclaw' not found in PATH). Templates using this provider will degrade to fallback executor.[0m
+[34m[py][0m [33mINFO:     Application startup complete.[0m
+[34m[py][0m INFO:     127.0.0.1:60226 - "GET /docs HTTP/1.1" 200 OK
+[32m✓[0m Python 就绪 :8000
+[32m[gw][0m [sqlite] db loaded at D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\server\.shadowflow\app.sqlite
+[32m[gw][0m [index] static /projects → D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\server\.shadowflow\projects
+[32m[gw][0m [skill-loader] loaded 6 skill(s) from D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\server\skills
+[32m[gw][0m [skill-loader] loaded 9 skill(s) from D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\.shadowflow\skills
+[32m[gw][0m [index] skill-loader: 9 loaded, 0 error(s)
+[32m[gw][0m [design-system-loader] seeded 4 built-in DS file(s): tailwind, material, shadcn, none
+[32m[gw][0m [index] design-system-loader: seeded tailwind, material, shadcn, none
+[32m[gw][0m [design-system-loader] loaded 4 design system(s) from D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\server\.shadowflow\design-systems
+[32m[gw][0m [design-system-loader] override hardcoded DS: material
+[32m[gw][0m [design-system-loader] override hardcoded DS: none
+[32m[gw][0m [design-system-loader] override hardcoded DS: shadcn
+[32m[gw][0m [design-system-loader] override hardcoded DS: tailwind
+[32m[gw][0m [index] design-system-loader: 4 loaded, 0 error(s), override: material, none, shadcn, tailwind
+[32m[gw][0m ╔══════════════════════════════════════════════════════╗
+[32m[gw][0m ║          ShadowFlow API Server — Port 8002          ║
+[32m[gw][0m ╚══════════════════════════════════════════════════════╝
+[32m[gw][0m   Mode     : BYOK (user-supplied key)
+[32m[gw][0m   CORS     : http://localhost:3007
+[32m[gw][0m   Health   : http://localhost:8002/health
+[32m[gw][0m   Sessions : http://localhost:8002/api/run-sessions
+[32m[gw][0m [skill-loader] background compile starting for example
+[32m[gw][0m [session-store] loaded 4 session(s) from D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\server\.shadowflow\sessions
+[32m[gw][0m [skill-loader] background compile finished for example
+[32m[gw][0m [index] cli-detector: 0/22 CLI(s) detected
+[32m[gw][0m [2026-11-06T18:55:05.642Z] GET /health
+[32m[gw][0m [2026-11-06T18:55:05.647Z] GET /health
+[32m✓[0m 网关就绪 :8002
+
+[32m✓[0m 后端全部就绪
+  新前端统一入口: [1mhttp://localhost:8002[0m
+  Python OpenAPI:  [1mhttp://localhost:8000/docs[0m
+[32m[gw][0m [index] acp-detector: 0/2 agent(s) installed
+[34m[py][0m INFO:     127.0.0.1:60235 - "GET / HTTP/1.1" 200 OK
+[32m[gw][0m [2026-11-06T18:55:06.123Z] GET /health
+[34m[py][0m INFO:     127.0.0.1:60237 - "GET / HTTP/1.1" 200 OK
+[34m[py][0m [33mD:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\.venv\Lib\site-packages\fastapi\openapi\utils.py:295: UserWarning: Duplicate Operation ID list_runs_runs_get for function list_runs at D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\shadowflow\server.py[0m
+[34m[py][0m [33m  warnings.warn(message, stacklevel=1)[0m
+[34m[py][0m [33mD:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\.venv\Lib\site-packages\fastapi\openapi\utils.py:295: UserWarning: Duplicate Operation ID get_run_graph_runs__run_id__graph_get for function get_run_graph at D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\shadowflow\server.py[0m
+[34m[py][0m [33m  warnings.warn(message, stacklevel=1)[0m
+[34m[py][0m [33mD:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\.venv\Lib\site-packages\fastapi\openapi\utils.py:295: UserWarning: Duplicate Operation ID get_task_tree_runs__run_id__task_tree_get for function get_task_tree at D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\shadowflow\server.py[0m
+[34m[py][0m [33m  warnings.warn(message, stacklevel=1)[0m
+[34m[py][0m [33mD:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\.venv\Lib\site-packages\fastapi\openapi\utils.py:295: UserWarning: Duplicate Operation ID get_artifact_lineage_runs__run_id__artifact_lineage_get for function get_artifact_lineage at D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\shadowflow\server.py[0m
+[34m[py][0m [33m  warnings.warn(message, stacklevel=1)[0m
+[34m[py][0m [33mD:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\.venv\Lib\site-packages\fastapi\openapi\utils.py:295: UserWarning: Duplicate Operation ID get_checkpoint_lineage_runs__run_id__checkpoint_lineage_get for function get_checkpoint_lineage at D:\KimiData\kimi\tasks\2026-11-07\00-53-34-e44badec\ShadowFlow\shadowflow\server.py[0m
+[34m[py][0m [33m  warnings.warn(message, stacklevel=1)[0m
+[34m[py][0m INFO:     127.0.0.1:60238 - "GET /openapi.json HTTP/1.1" 200 OK
+
+[31m✖ [py] 已退出 (code=143 signal=null) — 停止其余服务[0m

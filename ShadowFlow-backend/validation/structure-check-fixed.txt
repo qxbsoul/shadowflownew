@@ -1,0 +1,5 @@
+removed frontend paths: OK
+launcher syntax: OK
+compose services: shadowflow-api, shadowflow-node
+OpenAPI paths: 210
+OpenAPI operation IDs: 256 unique

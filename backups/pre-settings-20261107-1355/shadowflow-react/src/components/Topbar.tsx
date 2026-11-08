@@ -1,0 +1,86 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ViewKey } from '../types';
+import { useWorkbench, VIEW_TITLES } from '../store';
+
+interface Hit {
+  k: string;
+  t: string;
+  v: ViewKey;
+}
+
+export default function Topbar() {
+  const { view, setView, tasks, deliverables, knowledge, openModal } = useWorkbench();
+  const [q, setQ] = useState('');
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onDoc = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('click', onDoc);
+    return () => document.removeEventListener('click', onDoc);
+  }, []);
+
+  const hits = useMemo<Hit[]>(() => {
+    const query = q.trim().toLowerCase();
+    if (!query) return [];
+    const out: Hit[] = [];
+    tasks.forEach(t => {
+      if (t.title.toLowerCase().includes(query)) out.push({ k: '定时任务', t: t.title, v: 'tasks' });
+    });
+    deliverables.forEach(d => {
+      if (d.title.toLowerCase().includes(query)) out.push({ k: '交付物', t: d.title, v: 'deliverables' });
+    });
+    knowledge.forEach(k => {
+      if ((k.title + k.desc).toLowerCase().includes(query)) out.push({ k: '知识', t: k.title, v: 'knowledge' });
+    });
+    return out.slice(0, 8);
+  }, [q, tasks, deliverables, knowledge]);
+
+  return (
+    <header className="topbar">
+      <div className="page-title">{VIEW_TITLES[view]}</div>
+      <div className="search-wrap" ref={wrapRef}>
+        <input
+          className="search-box"
+          placeholder="搜索任务、交付物、知识…"
+          value={q}
+          onChange={e => {
+            setQ(e.target.value);
+            setOpen(!!e.target.value.trim());
+          }}
+        />
+        <div className={open ? 'search-drop show' : 'search-drop'}>
+          {hits.length ? (
+            hits.map((h, i) => (
+              <div
+                key={h.v + i}
+                className="search-hit"
+                onClick={() => {
+                  setView(h.v);
+                  setOpen(false);
+                }}
+              >
+                <div className="k">{h.k}</div>
+                <div className="t">{h.t}</div>
+              </div>
+            ))
+          ) : (
+            <div className="empty-tip" style={{ padding: '14px' }}>
+              没有匹配的结果
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="topbar-right">
+        <button className="btn btn-ghost btn-sm" onClick={() => setView('dashboard')}>
+          周报数据
+        </button>
+        <button className="btn btn-primary btn-sm" onClick={() => openModal({ kind: 'new-task' })}>
+          新建任务
+        </button>
+      </div>
+    </header>
+  );
+}

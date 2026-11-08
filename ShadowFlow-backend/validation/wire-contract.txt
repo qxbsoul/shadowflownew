@@ -1,0 +1,18 @@
+
+=== Wire-contract guard ===
+
+Scanning server/src/ for sf.* storage key writers + readers…
+
+Files scanned: 195
+Storage-key constants discovered: 0 declarations across 0 files
+
+Keys with both writers + readers: 0
+
+Phantom keys (R>0, W=0): 1
+  ⊘ sf.auto_critique  [allowlisted]
+     reason: Frontend-owned setting written through PUT /api/settings/:key; dynamic writer is not statically visible
+     R server/src/routes/run-sessions.ts:2309  : getSetting('sf.auto_critique');
+
+Summary: 0 balanced, 0 unallowed zombie, 0 unallowed phantom, 1 allowlist hits
+
+Wire-contract OK.

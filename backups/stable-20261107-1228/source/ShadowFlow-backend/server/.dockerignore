@@ -1,0 +1,13 @@
+node_modules
+npm-debug.log
+Dockerfile
+.dockerignore
+.shadowflow
+.tmp
+.tmp-*
+dist
+coverage
+.vitest
+*.log
+.env
+.env.*

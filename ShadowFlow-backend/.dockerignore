@@ -1,0 +1,41 @@
+# Version control and local environments
+.git
+.gitignore
+.venv
+venv
+env
+.smoke-venv
+
+# Dependencies and build/test output
+**/node_modules
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.coverage
+dist
+build
+validation
+test-results
+playwright-report
+
+# Secrets and local-only material
+.env
+.env.*
+_local
+docs
+*.log
+
+# Python runtime state: keep only source-tracked declarative data.
+server/.shadowflow
+.shadowflow/*
+!.shadowflow/skills
+!.shadowflow/agents
+!.shadowflow/teams
+.shadowflow/agents/*
+!.shadowflow/agents/*.agent.yaml
+.shadowflow/teams/*
+!.shadowflow/teams/*.team.yaml
+
+templates/custom
+.tmp
+.tmp-*
