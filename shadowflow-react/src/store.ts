@@ -47,6 +47,8 @@ import {
   queryKnowledgePack,
   registerOpc,
   runSchedule,
+  startScheduleRun,
+  finishScheduleRun,
   updateDepartment,
   updateEmployee,
   updateKnowledgePack as updateKnowledgePackApi,
@@ -84,10 +86,12 @@ import { avatarIdFor } from './avatar-set';
 import { persistConversationWorkspace, restoreConversationWorkspace, type ConversationMeta } from './conversation-storage';
 import {
   clearApiKey,
+  deleteCustomModel,
+  findModelPreset,
   loadApiSettings,
-  MIMO_BASE_URL,
   MIMO_MODEL,
   saveApiSettings,
+  selectCustomModel,
   type ApiConfigMode,
   type ApiSettingsInput,
   type ApiSettingsState,
@@ -183,7 +187,7 @@ export interface WorkbenchStore {
   activeConversationId: string;
   newConversation: (kind?: OpcChatKind) => void;
   selectConversation: (id: string) => void;
-  openConversation: (id: string) => Promise<void>;
+  openConversation: (id: string) => Promise<ConversationMeta | undefined>;
   switchConversationKind: (kind: OpcChatKind) => void;
   deleteConversation: (id: string) => Promise<void>;
   messages: Msg[];
@@ -240,6 +244,7 @@ export interface WorkbenchStore {
   selectModel: (id: string) => void;
   apiSettings: ApiSettingsState;
   saveModelSettings: (input: ApiSettingsInput) => void;
+  removeCustomModel: (id: string) => void;
   clearModelKey: (target: { mode: ApiConfigMode; provider: ByokProvider }) => void;
   /** 小商品店铺：商品 / 订单 / 财务与销售统计 / AI 变更审批。 */
   shopProducts: ShopProductDto[];
@@ -378,6 +383,8 @@ export function useWorkbenchStore(): WorkbenchStore {
   // 发送请求时读 ref，避免闭包拿到旧的模型 id。
   const selectedModelRef = useRef(MIMO_MODEL);
   const [apiSettings, setApiSettings] = useState<ApiSettingsState>(() => loadApiSettings());
+  // 发请求时读 ref，避免闭包拿到旧的模型配置。
+  const apiSettingsRef = useRef(apiSettings);
   const [dashboard, setDashboard] = useState<DashboardState>(EMPTY_DASHBOARD);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const companyIdRef = useRef<string | null>(null);
@@ -560,7 +567,7 @@ export function useWorkbenchStore(): WorkbenchStore {
    * 「定时任务｜…」对话就用它打开。
    */
   const openConversation = async (id: string) => {
-    if (!companyIdRef.current) return;
+    if (!companyIdRef.current) return undefined;
     try {
       const detail = await getOpcConversation(id);
       const meta = fromServerConversation(detail.conversation);
@@ -571,8 +578,10 @@ export function useWorkbenchStore(): WorkbenchStore {
       setActiveConversationId(id);
       applyConversationDetail(detail, detail.conversation.kind ?? 'single');
       setView('workbench');
+      return meta;
     } catch (error) {
       reportError(error, '对话加载失败');
+      return undefined;
     }
   };
 
@@ -947,13 +956,13 @@ export function useWorkbenchStore(): WorkbenchStore {
   };
 
   type ChatStreamAction = { type: 'edit'; id: string } | { type: 'redo'; id: string } | undefined;
-  const runChatStream = (text: string, files: File[] = [], action?: ChatStreamAction) => {
+  const runChatStream = (text: string, files: File[] = [], action?: ChatStreamAction, override?: ConversationMeta) => {
     const value = text.trim() || (files.length ? '请分析我发送的附件' : '');
     if (!value && action?.type !== 'redo') return;
     const conversationId = activeConversationRef.current;
     // ref 同步拦截同一对话的重复提交，state 只负责驱动各对话的 UI 状态。
     if (!conversationId || runningConversationsRef.current.has(conversationId)) return;
-    const conversation = conversations.find(item => item.id === conversationId);
+    const conversation = override ?? conversations.find(item => item.id === conversationId);
     if (!conversation) return toast('请先新建一个对话');
     if (conversation.projectId) {
       toast('历史项目对话为只读记录，请新建对话继续交流');
@@ -978,7 +987,7 @@ export function useWorkbenchStore(): WorkbenchStore {
     // 每次请求持有独立的 workflow 映射，切对话不会清除其他流的关联信息。
     const workflowIds = new Set<string>();
     const workflowRunIds = new Map<string, string>();
-    void (async () => {
+    return (async () => {
       try {
         const handleStreamEvent = (event: OpcChatStreamEvent) => {
           if (activeConversationRef.current !== conversationId) return;
@@ -1139,7 +1148,11 @@ export function useWorkbenchStore(): WorkbenchStore {
           await redoOpcChatCheckpointStream(conversationId, action.id, handleStreamEvent);
         } else {
           await sendOpcChatStream(conversationId, {
-            content: value, provider: 'mimo', model: selectedModelRef.current, custom: false, base_url: MIMO_BASE_URL,
+            content: value,
+            provider: apiSettingsRef.current.provider,
+            model: apiSettingsRef.current.model,
+            custom: apiSettingsRef.current.mode === 'custom',
+            base_url: apiSettingsRef.current.baseUrl,
           }, handleStreamEvent, files);
         }
       } catch (error) {
@@ -1229,16 +1242,13 @@ export function useWorkbenchStore(): WorkbenchStore {
     if (!liveRef.current) throw new Error('离线状态无法执行真实任务');
     let result: ScheduleRunDto | undefined;
     await runTaskMutation(`run:${id}`, '立即执行失败', async () => {
-      result = await runSchedule(id);
+      // 先建对话，再用聊天流跑：总经理思考、员工产出、审批卡片都会实时出现在工作台。
+      const started = await startScheduleRun(id);
+      const meta = await openConversation(started.conversation_id);
+      const stream = runChatStream(started.task_description, [], undefined, meta);
+      if (stream) await stream;
+      result = await finishScheduleRun(id, started.conversation_id);
       await refreshTasks();
-      if (result.conversation_id) {
-        const latest = (await getOpcConversations()).map(fromServerConversation);
-        setConversations(previous => {
-          const existing = new Map(previous.map(item => [item.id, item]));
-          for (const item of latest) existing.set(item.id, item);
-          return [...existing.values()].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-        });
-      }
       if (result.status === 'succeeded') toast('任务已真实执行并完成');
       else toast(`任务执行状态：${result.status}${result.error ? `，${result.error}` : ''}`);
     });
@@ -1494,24 +1504,46 @@ export function useWorkbenchStore(): WorkbenchStore {
       : `已切换到${next.plan_label}`);
   };
 
-  const selectModel = (id: string) => {
-    // 只允许切换到已经接入的模型（目前只有 MiMo）；以后新增模型时这里无需改动。
-    const next = models.find(item => item.id === id && item.vendor === 'MiMo');
-    if (!next) return;
-    selectedModelRef.current = next.id;
-    setSelectedModel(next.id);
-    try { localStorage.setItem('sf_selected_model', next.id); } catch { /* 忽略存储异常 */ }
-    setApiSettings(loadApiSettings());
+  const selectModel = (value: string) => {
+    // 对话页可以选择所有供应商的模型：选中后自动切换到对应供应商与内置 Base URL。
+    const target = findModelPreset(value);
+    if (!target) return;
+    const next = target.customId
+      ? selectCustomModel(target.customId)
+      : saveApiSettings({
+          mode: target.preset === 'custom' ? 'custom' : 'official',
+          preset: target.preset,
+          model: target.model,
+          baseUrl: target.baseUrl,
+          apiKey: '',
+        });
+    apiSettingsRef.current = next;
+    selectedModelRef.current = next.model;
+    setSelectedModel(next.model);
+    setApiSettings(next);
+    if (!next.hasKey) toast('已切换模型，请先在「设置 → 模型与 API」里配置该供应商的密钥');
   };
 
   const saveModelSettings = (input: ApiSettingsInput) => {
     const next = saveApiSettings(input);
+    apiSettingsRef.current = next;
+    selectedModelRef.current = next.model;
+    setSelectedModel(next.model);
+    setApiSettings(next);
+  };
+
+  const removeCustomModel = (id: string) => {
+    const next = deleteCustomModel(id);
+    apiSettingsRef.current = next;
+    selectedModelRef.current = next.model;
     setSelectedModel(next.model);
     setApiSettings(next);
   };
 
   const clearModelKey = (target: { mode: ApiConfigMode; provider: ByokProvider }) => {
-    setApiSettings(clearApiKey(target));
+    const next = clearApiKey(target);
+    apiSettingsRef.current = next;
+    setApiSettings(next);
   };
 
   useEffect(() => {
@@ -1534,13 +1566,11 @@ export function useWorkbenchStore(): WorkbenchStore {
         const modelItems = await getModels();
         if (cancelled) return;
         setModels(modelItems);
-        const stored = (() => { try { return localStorage.getItem('sf_selected_model') ?? ''; } catch { return ''; } })();
-        const usable = modelItems.filter(item => item.vendor === 'MiMo');
-        const initialModel = usable.some(item => item.id === stored) ? stored : MIMO_MODEL;
-        selectedModelRef.current = initialModel;
-        setSelectedModel(initialModel);
-        try { localStorage.setItem('sf_selected_model', initialModel); } catch { /* 忽略存储异常 */ }
-        setApiSettings(loadApiSettings());
+        const settings = loadApiSettings();
+        apiSettingsRef.current = settings;
+        selectedModelRef.current = settings.model;
+        setSelectedModel(settings.model);
+        setApiSettings(settings);
         liveRef.current = true;
         setGwStatus('ok');
         await restoreCompanyChat(owned);
@@ -1626,7 +1656,7 @@ export function useWorkbenchStore(): WorkbenchStore {
     org, companyId: companyIdRef.current, refreshOrg, selectedPosId, selectedStaffId, selectPosition, selectStaff, savePosition, saveStaff,
     createDept, renameDept, deleteDept, createPosition, deletePosition, createStaff, deleteStaff,
     modal, openModal, closeModal, toasts, toast, gwStatus, models, selectedModel, selectModel,
-    apiSettings, saveModelSettings, clearModelKey,
+    apiSettings, saveModelSettings, removeCustomModel, clearModelKey,
     shopProducts, shopProductsLoading, refreshShopProducts,
     shopOrders, shopOrdersLoading, refreshShopOrders,
     shopFinance, shopSales, shopStatsLoading, refreshShopFinance, refreshShopSales,

@@ -40,6 +40,8 @@ export interface ParsedTask {
   depends_on?: string[];
   /** Explicit human gate before this task is allowed to execute. */
   requires_approval?: boolean;
+  /** 给老板看的审批摘要（1-3 句，具体做什么/涉及什么/交付什么），不含角色设定。 */
+  approval_brief?: string;
 }
 
 export interface DecomposeOutcome {
@@ -79,9 +81,11 @@ export function composeParsePrompt(userText: string, agents: OrchestratorAgent[]
     '{',
     '  "intent": "casual | question | discussion | task",',
     '  "strategy": "solo | expert | pipeline | parallel | roundtable | all-hands",',
-    '  "tasks": [ { "id": "<可选任务 id>", "agentId": "<成员 id，必须来自上面名单>", "title": "≤20字任务标题", "prompt": "发给该 agent 的完整指令，包含它需要的全部上下文", "depends_on": ["<上游任务 id 或成员 id>"], "requires_approval": false } ]',
+    '  "tasks": [ { "id": "<可选任务 id>", "agentId": "<成员 id，必须来自上面名单>", "title": "≤20字任务标题", "prompt": "发给该 agent 的完整指令，包含它需要的全部上下文", "depends_on": ["<上游任务 id 或成员 id>"], "requires_approval": false, "approval_brief": "<仅当需要审批时填写：给老板看的 1-3 句，说明要做什么、涉及对象/金额、交付物>" } ]',
     '}',
-    '规则：每个成员至多一个任务；与请求无关的成员不要分配；prompt 用中文、自包含（不要写"见上文"）。仅当任务明确要求老板确认/审批后才执行时设置 requires_approval=true。',
+    '规则：每个成员至多一个任务；与请求无关的成员不要分配；prompt 用中文、自包含（不要写"见上文"）。',
+    '只有当任务会改变外部世界时才设置 requires_approval=true：对外发布/上线、上架或修改/删除商品、给客户群发、付款/退款、签合同、删除数据、投放预算、品牌定稿/合规放行；此时必须同时给出 approval_brief（给老板看的摘要，不要写角色设定或系统提示词）。',
+    '写小结、总结、汇总、报告、简报、调研、分析、方案、文案、草稿、计划、整理、复盘一律 requires_approval=false，不要为了凑流程设置审批。',
   ].join('\n');
 }
 
@@ -163,6 +167,8 @@ function validateTasks(list: unknown[], agents: OrchestratorAgent[]): ParsedTask
       prompt,
       ...(dependsOn && dependsOn.length > 0 ? { depends_on: dependsOn } : {}),
       ...(t.requires_approval === true ? { requires_approval: true } : {}),
+      ...(t.requires_approval === true && typeof t.approval_brief === 'string' && t.approval_brief.trim()
+        ? { approval_brief: t.approval_brief.trim().slice(0, 600) } : {}),
     });
   }
   return tasks.length > 0 ? tasks : null;

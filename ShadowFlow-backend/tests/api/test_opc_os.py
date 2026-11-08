@@ -65,7 +65,7 @@ def test_seed_idempotent_company_roster_products(opc_db):
     assert co["cash_cents"] == 200000
 
     depts = opc_company.list_departments(co["id"])
-    assert len(depts) == 5
+    assert len(depts) == len(opc_seed.DEPARTMENTS)
     # 部门负责人 = 该部门第一位入职员工
     heads = [d["head_employee_id"] for d in depts]
     assert all(heads), "每个部门都应自动任命负责人"

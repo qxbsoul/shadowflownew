@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useWorkbench } from '../store';
+import { loadCustomModels, PROVIDER_PRESETS } from '../settings-storage';
 import LiveBoard from './LiveBoard';
 import ConversationSidebar from './ConversationSidebar';
 import ChatRichContent from './ChatRichContent';
@@ -19,7 +20,7 @@ const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif
 const VIDEO_TYPES = new Set(['video/mp4', 'video/webm']);
 
 export default function WorkbenchView() {
-  const { messages, typing, sendChat, editChatMessage, redoCheckpoint, conversations, activeConversationId, toast, models, selectedModel, selectModel, org } = useWorkbench();
+  const { messages, typing, sendChat, editChatMessage, redoCheckpoint, conversations, activeConversationId, toast, apiSettings, selectModel, org } = useWorkbench();
   const [text, setText] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
@@ -28,8 +29,12 @@ export default function WorkbenchView() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  // 目前只接入 MiMo；以后新增供应商时这里会自然出现更多选项。
-  const supportedModels = models.filter(model => model.vendor === 'MiMo');
+  // 对话页列出所有供应商的模型（自定义模型可并存多条），选中后自动切换。
+  const modelGroups = Object.values(PROVIDER_PRESETS).map(preset => ({ key: preset.key, label: preset.label, models: preset.models }));
+  const customEntries = loadCustomModels();
+  const selectValue = apiSettings.preset === 'custom' && apiSettings.customId ? `custom:${apiSettings.customId}` : apiSettings.model;
+  const hasCurrentModel = modelGroups.some(group => group.models.some(model => model.id === selectValue))
+    || customEntries.some(entry => `custom:${entry.id}` === selectValue);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set());
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
@@ -164,13 +169,21 @@ export default function WorkbenchView() {
           <label className="model-chip" aria-label="当前模型">
             <span>模型</span>
             <select
-              value={selectedModel}
+              value={selectValue}
               onChange={event => selectModel(event.target.value)}
-              disabled={!supportedModels.length}
               title="切换模型"
             >
-              {!supportedModels.length && <option value={selectedModel}>读取模型…</option>}
-              {supportedModels.map(model => <option key={model.id} value={model.id}>{model.label}</option>)}
+              {modelGroups.map(group => (
+                <optgroup key={group.key} label={group.label}>
+                  {group.models.map(model => <option key={model.id} value={model.id}>{model.label}</option>)}
+                </optgroup>
+              ))}
+              {customEntries.length > 0 && (
+                <optgroup label="自定义">
+                  {customEntries.map(entry => <option key={entry.id} value={`custom:${entry.id}`}>{entry.label}（{entry.model}）</option>)}
+                </optgroup>
+              )}
+              {!hasCurrentModel && <option value={selectValue}>{apiSettings.model || '未配置模型'}</option>}
             </select>
           </label>
         </div>

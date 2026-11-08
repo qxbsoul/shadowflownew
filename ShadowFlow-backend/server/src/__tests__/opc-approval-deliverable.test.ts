@@ -45,25 +45,31 @@ afterEach(() => {
 });
 
 describe('人工审批内容', () => {
-  it('历史审批没有正文时，从本轮 DAG 工单回填内容', () => {
+  it('历史审批没有正文时，用 DAG 里的审批摘要回填', () => {
     const conversation = createOpcConversation('co1', 'single', '老审批对话');
     appendOpcMessage(conversation.id, {
       sender_kind: 'ceo', sender_name: '总经理', channel: 'workflow', run_id: 'run-old', content: '意图：任务',
-      metadata: { dag: { nodes: [{ id: 'run-old:task:1', prompt: '把方案发布到官网并抄送销售' }] } },
+      metadata: { dag: { nodes: [{
+        id: 'run-old:task:1', title: '发布方案',
+        approval_brief: '把方案发布到公司官网并抄送销售，发布时间为周五 10:00。',
+        prompt: '你是项目经理，老板要求：把方案发布到官网并抄送销售。',
+      }] } },
     });
     createOpcApproval({
       company_id: 'co1', conversation_id: conversation.id, run_id: 'run-old',
       task_id: 'run-old:task:1', task_title: '发布方案', content: '',
     });
     const listed = listCompanyOpcApprovals('co1');
-    expect(listed[0].content).toBe('把方案发布到官网并抄送销售');
+    expect(listed[0].content).toBe('把方案发布到公司官网并抄送销售，发布时间为周五 10:00。');
+    // 没有摘要的旧数据只回显标题，绝不把岗位系统提示词透出来。
+    expect(listed[0].content).not.toContain('你是');
     // 对话里的审批卡片（消息 metadata）也应被补齐
     const withCard = appendOpcMessage(conversation.id, {
       sender_kind: 'ceo', sender_name: '总经理', channel: 'workflow', run_id: 'run-old',
       task_id: 'run-old:task:1', content: '请审批', metadata: { approval: { ...listed[0], content: '' } as never },
     });
     const message = listOpcMessages(conversation.id).find(item => item.id === withCard.id)!;
-    expect(message.metadata_json).toContain('把方案发布到官网并抄送销售');
+    expect(message.metadata_json).toContain('把方案发布到公司官网');
   });
 
   it('审批落库时保存工单正文，左侧列表按公司跨对话返回', async () => {
@@ -71,7 +77,12 @@ describe('人工审批内容', () => {
     const callImpl = async function* (_provider: string, input: ProviderInput) {
       if (input.systemPrompt.includes('编排者')) {
         yield { type: 'text-delta' as const, text: JSON.stringify({ intent: 'task', strategy: 'expert', tasks: [
-          { id: 'release', agentId: 'e1', title: '对外发布', prompt: '把下季度投放方案发布到官网，并附上预算明细', requires_approval: true },
+          {
+            id: 'release', agentId: 'e1', title: '对外发布',
+            prompt: '把下季度投放方案发布到官网，并附上预算明细',
+            requires_approval: true,
+            approval_brief: '把下季度投放方案发布到公司官网，并附上预算明细，计划周五 10:00 上线。',
+          },
         ] }) };
         return;
       }
@@ -87,10 +98,10 @@ describe('人工审批内容', () => {
     });
     const pending = events.find((event): event is Extract<OpcChatStreamEvent, { type: 'approval' }> => event.type === 'approval')!;
 
-    // 审批对象必须带真实工单正文，而不是只有标题。
-    expect(pending.approval.content).toContain('把下季度投放方案发布到官网');
-    expect(pending.approval.content).toContain('老板目标：');
-    expect(pending.approval.content).toContain('工单：对外发布');
+    // 审批对象必须是老板能看懂的摘要，而不是岗位系统提示词。
+    expect(pending.approval.content).toContain('把下季度投放方案发布到公司官网');
+    expect(pending.approval.content).toContain('预算明细');
+    expect(pending.approval.content).not.toMatch(/你是|老板要求|岗位/);
     const listed = listCompanyOpcApprovals('co1');
     expect(listed).toHaveLength(1);
     expect(listed[0]).toMatchObject({ task_title: '对外发布' });

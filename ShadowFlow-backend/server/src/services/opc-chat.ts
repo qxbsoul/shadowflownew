@@ -69,6 +69,8 @@ export interface OpcDagNodeMetadata {
   depends_on: string[];
   declared_depends_on: string[];
   requires_approval: boolean;
+  /** 给老板看的审批摘要（不含角色/系统提示词）；仅需审批的节点有值。 */
+  approval_brief?: string;
   validation_error: string | null;
 }
 
@@ -302,17 +304,32 @@ export function decideOpcChatApproval(input: {
  * 商品上架/改价/删除不在这里重复拦——店铺工具本身就会生成「商品变更审批」，
  * 再叠一层任务审批只会让同一次操作批两遍。
  */
-const APPROVAL_NOTICE_RE = /待老板(?:确认|审批)|需(?:要)?老板(?:确认|审批)|老板(?:确认|审批)后|批准后(?:再|才)|确认后(?:再|才)/;
+/**
+ * 需要老板审批的只有「会改变外部世界 / 花钱」的动作：对外发布、上架或改商品、给客户群发、
+ * 付款退款、签合同、删除数据、投放预算、品牌定稿/合规放行。
+ *
+ * 只看任务标题，不扫工单正文——正文里常有“未经老板确认前不对外发布”这类否定句，
+ * 扫正文会把「生成公司阶段小结」这种普通汇报误判成审批。
+ */
 const APPROVAL_ACTION_RE = new RegExp([
-  '删除(?:数据|记录|文件|账号)', '发布(?:到|至|上线|出去)|对外发布|公开上线',
-  '群发|批量发送|发送给客户|发送至客户|邮件发送', '签署|签合同|付款|收款|退款|转账|打款',
-  '投放(?:广告|预算)|购买(?:广告|流量)', '品牌定稿|最终定稿|合规放行|风险豁免',
+  '对外发布', '发布(?:到|至|上线)', '发布(?:新品|产品|公告|新闻稿|页面|上线)',
+  '公开上线', '上线(?:发布|新)',
+  '上架', '下架', '改价', '调价', '定价', '改库存', '删除(?:商品|产品|数据|记录|文件)',
+  '群发', '批量发送', '发送给客户', '发送至客户', '发给客户', '邮件发送',
+  '付款', '收款', '退款', '转账', '打款', '签署', '签合同',
+  '投放(?:广告|预算)', '购买(?:广告|流量)', '品牌定稿', '最终定稿', '合规放行', '风险豁免',
 ].join('|'));
 
-function explicitApproval(title: string, prompt: string, declared: boolean | undefined): boolean {
-  if (declared === true) return true;
-  const text = `${title}\n${prompt}`;
-  return APPROVAL_NOTICE_RE.test(text) || APPROVAL_ACTION_RE.test(text);
+/** 纯内容生产/内部汇报：即使规划器误标，也永不触发任务级审批。 */
+const NON_APPROVAL_TITLE_RE = /小结|总结|汇总|报告|简报|周报|日报|调研|分析|方案|文案|草稿|计划|整理|梳理|复盘|记录|清单|排期|规划|撰写|草拟|答复|回复/;
+
+function explicitApproval(title: string, prompt: string, _declared: boolean | undefined): boolean {
+  if (isShopWriteTask(title, prompt)) return false;
+  const headline = title.trim();
+  if (APPROVAL_ACTION_RE.test(headline)) return true;
+  if (NON_APPROVAL_TITLE_RE.test(headline)) return false;
+  // 标题里没有明确的硬动作（如“生成阶段小结”），一律不作为审批。
+  return false;
 }
 
 /**
@@ -324,21 +341,19 @@ function isShopWriteTask(title: string, prompt: string): boolean {
   return /商品|产品|店铺/.test(text) && /上架|下架|改价|调价|定价|库存|删除/.test(text);
 }
 
-/** 审批卡片上要显示的具体内容：目标 + 工单 + 上游交接摘要，不能只有标题。 */
+/** 审批卡片上要显示的具体内容：老板能看懂的摘要 + 上游交付，不贴系统提示词，也不能只有标题。 */
 function approvalContentOf(input: {
   goal: string;
   title: string;
-  prompt: string;
+  brief?: string;
   handoffs?: string[];
 }): string {
-  return [
-    `老板目标：${input.goal}`.slice(0, 1200),
-    `工单：${input.title}`,
-    input.prompt,
-    input.handoffs?.length
-      ? `上游交接摘要：\n${input.handoffs.filter(Boolean).join('\n\n').slice(-4000)}`
-      : '',
-  ].filter(Boolean).join('\n\n').slice(0, 12_000);
+  const brief = (input.brief ?? '').trim();
+  const parts: string[] = [];
+  parts.push(brief || `工单：${input.title}\n老板目标：${input.goal}`);
+  const handoff = input.handoffs?.filter(Boolean).join('\n\n').slice(-4000) ?? '';
+  if (handoff) parts.push(`上游交付摘要：\n${handoff}`);
+  return parts.join('\n\n').slice(0, 12_000);
 }
 
 export async function runOpcChatTurn(input: {
@@ -505,9 +520,9 @@ export async function runOpcChatTurn(input: {
     '组织采用“老板 → AI 总经理 → AI 员工”的扁平汇报关系；员工只向总经理交付，不互相派单。',
     '按真实花名册选择最相关的员工，不要把所有员工流水账式全部调用。单工种只选一人，多工种按依赖排序并明确交接。',
     '职能参考：市场研究负责用户/市场/竞品与数据；品牌策划负责定位/卖点/品牌故事；内容创作负责文案/图文/短视频脚本；电商运营负责商品/上架/店铺运营；商务拓展负责采购材料/潜客/线索；风控审核负责合规/授权/质量。',
-    '对外发布、品牌定稿、高风险合规和资金操作只能提出待老板审批的事项，不得擅自声称已执行。',
-    '以下动作必须设置 requires_approval=true：对外发布/上线、向客户发送或群发、付款/收款/退款、签署合同、删除数据、品牌定稿、高风险合规放行。',
-    '普通撰写、调研、分析、出方案不需要审批，也不要为了凑流程把所有任务都标成需要审批。',
+    '只有会改变外部世界或花钱的动作才需要老板审批：对外发布、上架或修改商品、给客户群发、付款退款、签合同、删除数据、投放预算、品牌定稿/合规放行。',
+    '需要审批时必须给出 approval_brief：给老板看的 1-3 句，写清要做什么、涉及对象/金额、交付物，不要写角色设定或系统提示词。',
+    '写小结、总结、汇总、报告、简报、调研、分析、方案、文案、草稿、计划、整理、复盘一律不需要审批，不要为了凑流程设置审批。',
     '店铺商品的上架、改价、库存与删除，必须交给员工用店铺工具发起变更申请，再由老板在人工审批里决定是否生效；不要声称已经直接改好。',
     '',
     '【本轮对话历史】',
@@ -562,6 +577,7 @@ export async function runOpcChatTurn(input: {
       depends_on: [],
       declared_depends_on: task.depends_on ?? [],
       requires_approval: !isShopWriteTask(task.title, task.prompt) && explicitApproval(task.title, task.prompt, task.requires_approval),
+      approval_brief: task.requires_approval ? task.approval_brief?.trim() : undefined,
       validation_error: employee ? null : `执行员工不存在：${task.agentId}`,
       systemPrompt: [
         employee?.system_prompt || `你是公司的${employee?.title || employee?.role || '员工'}${employee?.name || ''}，只负责自己的专业工单。`,
@@ -700,7 +716,7 @@ export async function runOpcChatTurn(input: {
           content: approvalContentOf({
             goal: content,
             title: node.title,
-            prompt: node.prompt,
+            brief: node.approval_brief,
             handoffs: upstreamResults.map(result => result.handoff ?? ''),
           }),
         });

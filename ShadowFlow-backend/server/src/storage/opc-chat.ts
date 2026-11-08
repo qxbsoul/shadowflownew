@@ -150,8 +150,8 @@ export function deleteOpcConversation(id: string, companyId: string): boolean {
 }
 
 /**
- * 历史审批没存正文时的兜底：从本轮 DAG 分工消息里取回该工单的 prompt。
- * 只读、尽力而为；取不到就返回空串。
+ * 历史审批没存正文时的兜底：优先用 DAG 节点里的「给老板看的审批摘要」；
+ * 没有摘要时只回工单标题，绝不把岗位系统提示词（“你是…/老板要求…”）透给老板。
  */
 function dagTaskPrompt(conversationId: string, runId: string | null, taskId: string): string {
   if (!runId) return '';
@@ -160,9 +160,12 @@ function dagTaskPrompt(conversationId: string, runId: string | null, taskId: str
     ORDER BY created_at LIMIT 1`).get(conversationId, runId) as { metadata_json: string } | undefined;
   if (!row?.metadata_json) return '';
   try {
-    const metadata = JSON.parse(row.metadata_json) as { dag?: { nodes?: Array<{ id?: string; prompt?: string }> } };
+    const metadata = JSON.parse(row.metadata_json) as { dag?: { nodes?: Array<{ id?: string; title?: string; approval_brief?: string }> } };
     const node = metadata.dag?.nodes?.find(item => item.id === taskId);
-    return typeof node?.prompt === 'string' ? node.prompt : '';
+    if (!node) return '';
+    const brief = typeof node.approval_brief === 'string' ? node.approval_brief.trim() : '';
+    if (brief) return brief;
+    return node.title ? `工单：${node.title}` : '';
   } catch {
     return '';
   }

@@ -115,7 +115,7 @@ export default function ApprovalsView() {
                   </span>
                 </div>
                 <div className="approval-content">
-                  <div className="approval-content-label">需要审批的内容（总经理下发工单）</div>
+                  <div className="approval-content-label">需要审批的内容</div>
                   {item.content ? (
                     <ChatRichContent content={item.content} className="approval-content-body" />
                   ) : (

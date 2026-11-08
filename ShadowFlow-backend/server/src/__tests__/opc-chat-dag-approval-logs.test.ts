@@ -174,6 +174,64 @@ describe('公司对话 DAG 与审批', () => {
     expect(approvalCards).toHaveLength(1);
     expect(JSON.parse(approvalCards[0].metadata_json!)).toMatchObject({ approval: { status: 'decided', decision: 'approve' } });
   });
+
+  it('普通汇报即使被误标、正文提到“不对外发布”，也不会触发审批', async () => {
+    const events: OpcChatStreamEvent[] = [];
+    const callImpl = async function* (_provider: string, input: ProviderInput) {
+      if (input.systemPrompt.includes('编排者')) {
+        yield { type: 'text-delta' as const, text: JSON.stringify({
+          intent: 'task', strategy: 'expert', tasks: [
+            {
+              id: 'summary', agentId: 'e1', title: '生成公司阶段小结',
+              prompt: '老板要求：生成公司阶段小结。本小结为内部汇报稿，未经老板确认前不对外发布。',
+              requires_approval: true,
+            },
+          ],
+        }) };
+        return;
+      }
+      if (input.systemPrompt.includes('汇总员工')) { yield { type: 'text-delta' as const, text: '汇总完成' }; return; }
+      yield { type: 'text-delta' as const, text: '阶段小结正文' };
+    };
+    const conversation = createOpcConversation('co1', 'single');
+    const result = await runOpcChatTurn({
+      conversationId: conversation.id, companyId: 'co1', content: '生成公司阶段小结', config,
+      authorization: 'Bearer test', callImpl, onEvent: event => events.push(event),
+    });
+    expect(result.plan?.dag.nodes[0].requires_approval).toBe(false);
+    expect(events.some(event => event.type === 'approval')).toBe(false);
+    expect(listOpcApprovals(conversation.id)).toHaveLength(0);
+  });
+
+  it('需要审批时卡片展示具体摘要，不泄露岗位系统提示词', async () => {
+    const events: OpcChatStreamEvent[] = [];
+    const brief = '将本周市场周报发布到公司官网与公众号，内容为 3 条已核实结论，计划周一 10:00 发布。';
+    const callImpl = async function* (_provider: string, input: ProviderInput) {
+      if (input.systemPrompt.includes('编排者')) {
+        yield { type: 'text-delta' as const, text: JSON.stringify({
+          intent: 'task', strategy: 'expert', tasks: [
+            { id: 'publish', agentId: 'e2', title: '对外发布市场周报', prompt: '统一口径后对外发布。', requires_approval: true, approval_brief: brief },
+          ],
+        }) };
+        return;
+      }
+      if (input.systemPrompt.includes('汇总员工')) { yield { type: 'text-delta' as const, text: '发布完成' }; return; }
+      yield { type: 'text-delta' as const, text: '已整理发布内容' };
+    };
+    const conversation = createOpcConversation('co1', 'single');
+    const running = runOpcChatTurn({
+      conversationId: conversation.id, companyId: 'co1', content: '把这周的周报发出去', config,
+      authorization: 'Bearer test', callImpl, onEvent: event => events.push(event),
+    });
+    await vi.waitFor(() => {
+      expect(events.some(event => event.type === 'approval')).toBe(true);
+    });
+    const pending = events.find((event): event is Extract<OpcChatStreamEvent, { type: 'approval' }> => event.type === 'approval');
+    expect(pending!.approval.content).toContain('发布到公司官网');
+    expect(pending!.approval.content).not.toMatch(/你是|老板要求|岗位/);
+    decideOpcChatApproval({ approvalId: pending!.approval.id, conversationId: conversation.id, companyId: 'co1', decision: 'approve' });
+    await running;
+  });
 });
 
 describe('公司对话日志接口', () => {

@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { hasStoredApiKey, MIMO_BASE_URL, MIMO_MODEL } from '../settings-storage';
+import { activeCustomModel, loadApiSettings, loadCustomModels, modelsForPreset, PRESET_OPTIONS, PROVIDER_PRESETS, type ApiPreset } from '../settings-storage';
 import { testEmbeddingConnection } from '../api';
 import {
   clearEmbeddingKey,
@@ -23,19 +23,25 @@ const FALLBACK_PLANS = [
   { key: 'custom' as const, label: '专业定制版', price_cents: 0, features: ['专属 Skill 与员工', '知识库迁移', '定制工作流与部署'], contact: true },
 ];
 
-export function modelsForProvider<T extends { id: string; vendor: string }>(models: T[], provider: string): T[] {
-  if (provider !== 'mimo') return [];
-  return models.filter(item => item.vendor === 'MiMo' && item.id === MIMO_MODEL);
-}
-
 export default function SettingsView() {
-  const { apiSettings, saveModelSettings, clearModelKey, billing, plans, refreshBilling, upgradePlan, toast } = useWorkbench();
+  const { apiSettings, saveModelSettings, removeCustomModel, clearModelKey, billing, plans, refreshBilling, upgradePlan, toast } = useWorkbench();
   const [section, setSection] = useState<SettingsSection>('general');
   const [upgradeTarget, setUpgradeTarget] = useState<'studio' | null>(null);
   const [showContact, setShowContact] = useState(false);
   const [upgrading, setUpgrading] = useState(false);
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
+  const [modelForm, setModelForm] = useState(() => {
+    const settings = loadApiSettings();
+    return { preset: settings.preset, model: settings.model, baseUrl: settings.baseUrl };
+  });
+  const [customEntries, setCustomEntries] = useState(() => loadCustomModels());
+  const [customId, setCustomId] = useState(() => loadApiSettings().customId ?? '');
+  const [customLabel, setCustomLabel] = useState(() => {
+    const settings = loadApiSettings();
+    return settings.preset === 'custom' ? (activeCustomModel()?.label ?? '') : '';
+  });
+  const [confirmDeleteCustom, setConfirmDeleteCustom] = useState(false);
   const [feedback, setFeedback] = useState('');
   const [error, setError] = useState('');
   const [confirmClear, setConfirmClear] = useState(false);
@@ -46,22 +52,98 @@ export default function SettingsView() {
   const [embeddingTesting, setEmbeddingTesting] = useState(false);
   const [toolSettings, setToolSettings] = useState(() => loadToolSettings());
   const [toolFeedback, setToolFeedback] = useState('');
-  const hasKey = hasStoredApiKey('official', 'mimo');
+  const hasKey = apiSettings.hasKey;
+  const modelOptions = modelForm.preset === 'custom' ? [] : modelsForPreset(modelForm.preset).map(item => item.id);
 
   useEffect(() => {
     setApiKey('');
     setConfirmClear(false);
   }, [apiSettings]);
 
+  useEffect(() => {
+    setModelForm({ preset: apiSettings.preset, model: apiSettings.model, baseUrl: apiSettings.baseUrl });
+    setCustomEntries(loadCustomModels());
+    setCustomId(apiSettings.customId ?? '');
+    if (apiSettings.preset === 'custom') setCustomLabel(activeCustomModel()?.label ?? '');
+  }, [apiSettings.preset, apiSettings.model, apiSettings.baseUrl, apiSettings.customId]);
+
+  const selectPreset = (preset: ApiPreset) => {
+    setConfirmDeleteCustom(false);
+    if (preset === 'custom') {
+      const entries = loadCustomModels();
+      const entry = activeCustomModel(entries);
+      setCustomEntries(entries);
+      setCustomId(entry?.id ?? '');
+      setCustomLabel(entry?.label ?? '');
+      setModelForm({ preset: 'custom', model: entry?.model ?? '', baseUrl: entry?.baseUrl ?? '' });
+      return;
+    }
+    const presetDef = PROVIDER_PRESETS[preset];
+    setCustomId('');
+    setCustomLabel('');
+    setModelForm({
+      preset,
+      model: presetDef.models[0].id,
+      baseUrl: presetDef.baseUrl,
+    });
+  };
+
+  const selectCustomEntry = (id: string) => {
+    setConfirmDeleteCustom(false);
+    setCustomId(id);
+    if (!id) {
+      setCustomLabel('');
+      setModelForm(previous => ({ ...previous, model: '', baseUrl: '' }));
+      return;
+    }
+    const entry = customEntries.find(item => item.id === id);
+    if (!entry) return;
+    setCustomLabel(entry.label);
+    setModelForm(previous => ({ ...previous, model: entry.model, baseUrl: entry.baseUrl }));
+  };
+
+  const removeCustomEntry = () => {
+    if (!customId) return;
+    if (!confirmDeleteCustom) {
+      setConfirmDeleteCustom(true);
+      setFeedback('再次点击“确认删除”才会移除这个自定义模型。');
+      return;
+    }
+    removeCustomModel(customId);
+    setCustomId('');
+    setConfirmDeleteCustom(false);
+    setApiKey('');
+    setFeedback('已删除这个自定义模型。');
+  };
+
   const submit = (event: FormEvent) => {
     event.preventDefault();
     setFeedback('');
     setError('');
+    const model = modelForm.model.trim();
+    if (!model) {
+      setError('请选择或填写模型名称。');
+      return;
+    }
+    if (modelForm.preset === 'custom' && !modelForm.baseUrl.trim()) {
+      setError('自定义模型必须填写 Base URL（例如 https://api.deepseek.com/v1）。');
+      return;
+    }
     try {
-      saveModelSettings({ mode: 'official', provider: 'mimo', model: MIMO_MODEL, baseUrl: MIMO_BASE_URL, apiKey });
+      saveModelSettings({
+        mode: modelForm.preset === 'custom' ? 'custom' : 'official',
+        preset: modelForm.preset,
+        model,
+        baseUrl: modelForm.preset === 'custom' ? modelForm.baseUrl.trim() : PROVIDER_PRESETS[modelForm.preset].baseUrl,
+        apiKey,
+        ...(modelForm.preset === 'custom' ? { label: customLabel.trim() || model, customId: customId || undefined } : {}),
+      });
       setApiKey('');
       setShowKey(false);
-      setFeedback('MiMo 配置已保存到当前浏览器。');
+      setConfirmDeleteCustom(false);
+      setFeedback(modelForm.preset === 'custom'
+        ? `自定义模型「${customLabel.trim() || model}」已保存；以后可以继续新建，互不覆盖。`
+        : `${PROVIDER_PRESETS[modelForm.preset].label} 配置已保存到当前浏览器。`);
     } catch {
       setError('浏览器存储不可用，本次配置未保存。请检查隐私模式或存储权限。');
     }
@@ -73,7 +155,7 @@ export default function SettingsView() {
       setFeedback('再次点击“确认清除”才会移除密钥。');
       return;
     }
-    clearModelKey({ mode: 'official', provider: 'mimo' });
+    clearModelKey({ mode: apiSettings.mode, provider: apiSettings.provider });
     setApiKey('');
     setConfirmClear(false);
     setError('');
@@ -172,6 +254,7 @@ export default function SettingsView() {
                 <h3>套餐与积分</h3>
                 <span className="settings-badge saved">当前：{billing?.plan_label ?? '读取中'}</span>
               </div>
+              <div className="settings-form plan-body">
               <div className="plan-current">
                 <div><span>当前套餐</span><b>{billing?.plan_label ?? '—'}</b></div>
                 <div><span>本周期剩余</span><b>{billing ? `${billing.credits_remaining} / ${billing.credits_total} 积分` : '—'}</b></div>
@@ -209,6 +292,7 @@ export default function SettingsView() {
                 })}
               </div>
               <div className="plan-note">套餐与积分按自然月发放；升级后本周期积分重置为新套餐额度。10,000 Token 折算 1 积分。</div>
+              </div>
             </section>
           )}
           {section === 'model' && (
@@ -221,36 +305,106 @@ export default function SettingsView() {
                 <div className="settings-grid">
                   <div className="form-group">
                     <label className="form-label" htmlFor="settings-provider">服务提供商</label>
-                    <select id="settings-provider" className="form-select" value="mimo" disabled>
-                      <option value="mimo">MiMo</option>
+                    <select id="settings-provider" className="form-select" value={modelForm.preset} onChange={event => selectPreset(event.target.value as ApiPreset)}>
+                      {PRESET_OPTIONS.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
                     </select>
                   </div>
-                  <div className="form-group">
-                    <label className="form-label" htmlFor="settings-model">模型</label>
-                    <select id="settings-model" className="form-select" value={MIMO_MODEL} disabled>
-                      <option value={MIMO_MODEL}>MiMo v2.6 Pro</option>
-                    </select>
-                  </div>
+                  {modelForm.preset === 'custom' ? (
+                    <div className="form-group">
+                      <label className="form-label" htmlFor="settings-custom-entry">已保存的自定义模型</label>
+                      <select id="settings-custom-entry" className="form-select" value={customId} onChange={event => selectCustomEntry(event.target.value)}>
+                        <option value="">＋ 新建自定义模型</option>
+                        {customEntries.map(entry => <option key={entry.id} value={entry.id}>{entry.label}（{entry.model}）</option>)}
+                      </select>
+                    </div>
+                  ) : (
+                    <div className="form-group">
+                      <label className="form-label" htmlFor="settings-model">模型</label>
+                      <select id="settings-model" className="form-select" value={modelForm.model} onChange={event => setModelForm(previous => ({ ...previous, model: event.target.value }))}>
+                        {modelsForPreset(modelForm.preset).map(model => <option key={model.id} value={model.id}>{model.label}</option>)}
+                      </select>
+                    </div>
+                  )}
                 </div>
+                {modelForm.preset === 'custom' && (
+                  <div className="settings-grid">
+                    <div className="form-group">
+                      <label className="form-label" htmlFor="settings-custom-label">名称</label>
+                      <input
+                        id="settings-custom-label"
+                        className="form-input"
+                        value={customLabel}
+                        onChange={event => { setCustomLabel(event.target.value); setConfirmDeleteCustom(false); }}
+                        placeholder="给这个模型起个名字，例如 公司网关-DeepSeek"
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label" htmlFor="settings-custom-model">模型 ID</label>
+                      <input
+                        id="settings-custom-model"
+                        className="form-input"
+                        value={modelForm.model}
+                        onChange={event => setModelForm(previous => ({ ...previous, model: event.target.value }))}
+                        placeholder="例如 deepseek-flash"
+                      />
+                    </div>
+                  </div>
+                )}
                 <div className="form-group">
                   <label className="form-label" htmlFor="settings-base-url">Base URL</label>
-                  <input id="settings-base-url" className="form-input" value={MIMO_BASE_URL} readOnly />
+                  <input
+                    id="settings-base-url"
+                    className="form-input"
+                    value={modelForm.baseUrl}
+                    readOnly={modelForm.preset !== 'custom'}
+                    onChange={event => setModelForm(previous => ({ ...previous, baseUrl: event.target.value }))}
+                    placeholder={modelForm.preset === 'custom' ? 'https://api.deepseek.com/v1' : PROVIDER_PRESETS[modelForm.preset].baseUrl}
+                  />
+                  <div className="settings-help">
+                    {modelForm.preset === 'custom'
+                      ? '填写 OpenAI 兼容接口的 Base URL（通常以 /v1 结尾）。'
+                      : `内置地址：${PROVIDER_PRESETS[modelForm.preset].baseUrl}`}
+                  </div>
                 </div>
                 <div className="form-group">
                   <label className="form-label" htmlFor="settings-api-key">API Key</label>
                   <div className="settings-key-row">
-                    <input id="settings-api-key" className="form-input" type={showKey ? 'text' : 'password'} value={apiKey} onChange={event => { setApiKey(event.target.value); setConfirmClear(false); }} placeholder={hasKey ? '已有密钥；留空保存则保持不变' : '输入你的 MiMo API Key'} autoComplete="new-password" spellCheck={false} />
+                    <input
+                      id="settings-api-key"
+                      className="form-input"
+                      type={showKey ? 'text' : 'password'}
+                      value={apiKey}
+                      onChange={event => { setApiKey(event.target.value); setConfirmClear(false); }}
+                      placeholder={
+                        modelForm.preset === 'mimo'
+                          ? '已内置服务端密钥；想用自己的 Key 可在此填写'
+                          : hasKey ? '已有密钥；留空保存则保持不变' : '输入你的 API Key'
+                      }
+                      autoComplete="new-password"
+                      spellCheck={false}
+                    />
                     <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowKey(value => !value)}>{showKey ? '隐藏' : '显示'}</button>
                   </div>
                   <div className="settings-help">密钥不会回显；仅保存在当前浏览器 localStorage，未加密，请勿在共享设备上使用。</div>
                 </div>
-                <div className="settings-notice">保存配置不代表已验证连接，首次真实对话时会向 MiMo 发起请求。</div>
+                {modelForm.preset === 'custom' && (
+                  <div className="settings-help">
+                    保存后会出现在对话页的模型下拉里；可以继续点「新建自定义模型」添加多个，名称、Base URL、模型和 Key 各自保存，互不覆盖。
+                  </div>
+                )}
+                <div className="settings-notice">保存配置不代表已验证连接，首次真实对话时会向所选服务商发起请求。</div>
                 {error && <div className="settings-feedback error" role="alert">{error}</div>}
                 {feedback && <div className="settings-feedback" role="status">{feedback}</div>}
                 <div className="settings-actions">
                   <button type="submit" className="btn btn-primary">保存配置</button>
+                  {modelForm.preset === 'custom' && customId && (
+                    <button type="button" className="btn btn-danger" onClick={removeCustomEntry}>
+                      {confirmDeleteCustom ? '确认删除这个模型' : '删除这个模型'}
+                    </button>
+                  )}
                   <button type="button" className="btn btn-danger" disabled={!hasKey} onClick={clearKey}>{confirmClear ? '确认清除' : '清除密钥'}</button>
                   {confirmClear && <button type="button" className="btn btn-ghost" onClick={() => { setConfirmClear(false); setFeedback(''); }}>取消</button>}
+                  {confirmDeleteCustom && <button type="button" className="btn btn-ghost" onClick={() => { setConfirmDeleteCustom(false); setFeedback(''); }}>取消删除</button>}
                 </div>
               </form>
             </section>

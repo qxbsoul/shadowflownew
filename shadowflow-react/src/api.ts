@@ -356,6 +356,19 @@ function providerHeader(provider: string): string {
   return `X-${provider.charAt(0).toUpperCase()}${provider.slice(1)}-Key`;
 }
 
+/** 当前选中的自定义模型条目（多个自定义模型并存，Key 跟着条目走）。 */
+function activeCustomEntry(): { model?: string; baseUrl?: string; key?: string } | null {
+  try {
+    const list = JSON.parse(localStorage.getItem('sf_custom_models') ?? '[]');
+    if (!Array.isArray(list) || list.length === 0) return null;
+    const id = localStorage.getItem('sf_custom_active');
+    const entry = list.find((item: { id?: string }) => item?.id === id) ?? list[0];
+    return entry && typeof entry === 'object' ? entry as { model?: string; baseUrl?: string; key?: string } : null;
+  } catch {
+    return null;
+  }
+}
+
 export function setByokKey(provider: ByokProvider, key: string): void {
   if (key) localStorage.setItem(`sf_${provider}_key`, key);
   else localStorage.removeItem(`sf_${provider}_key`);
@@ -382,9 +395,9 @@ export async function apiFetch(path: string, init: RequestInit = {}, timeoutMs =
     const key = localStorage.getItem(`sf_${provider}_key`);
     if (key) headers.set(providerHeader(provider), key);
   }
-  // 自定义 OpenAI 兼容密钥只发往真实聊天接口，其他业务请求最小披露。
-  if (path.startsWith('/api/opc-chat/') && localStorage.getItem('sf_api_config_mode') === 'custom') {
-    const customKey = localStorage.getItem('sf_custom_api_key');
+  // 自定义 OpenAI 兼容密钥只发往真实聊天接口：取当前选中的自定义模型条目。
+  if (path.startsWith('/api/opc-chat/') && localStorage.getItem('sf_model_preset') === 'custom') {
+    const customKey = activeCustomEntry()?.key;
     if (customKey) headers.set('X-Custom-Api-Key', customKey);
   }
   if (path.startsWith('/api/opc-knowledge/') || path.startsWith('/api/opc-chat/')) {
@@ -523,6 +536,13 @@ export const deleteSchedule = (scheduleId: string) => apiDelete<void>(`/api/sche
 export const runSchedule = (scheduleId: string) =>
   request<{ data: ScheduleRunDto }>(`/api/schedules/${encodeURIComponent(scheduleId)}/run`, { method: 'POST', body: '{}' }, 600_000).then(r => r.data);
 export const getScheduleRuns = (scheduleId: string) => apiGet<{ data: ScheduleRunDto[] }>(`/api/schedules/${encodeURIComponent(scheduleId)}/runs`).then(r => r.data);
+
+/** 流式执行：先建对话，随后由前端在这条对话里用聊天流跑，结束后写回运行记录。 */
+export const startScheduleRun = (scheduleId: string) =>
+  apiPost<{ data: { conversation_id: string; task_description: string } }>(`/api/schedules/${encodeURIComponent(scheduleId)}/start`, {}).then(r => r.data);
+export const finishScheduleRun = (scheduleId: string, conversationId: string) =>
+  request<{ data: ScheduleRunDto }>(`/api/schedules/${encodeURIComponent(scheduleId)}/finish`,
+    { method: 'POST', body: JSON.stringify({ conversation_id: conversationId }) }, 60_000).then(r => r.data);
 
 // 公司知识包：Node 校验归属，Python 负责文件解析与检索。
 export const getKnowledgePacks = () => apiGet<{ data: { packs: KnowledgePackDto[] } }>('/api/opc-knowledge/packs').then(r => r.data.packs);
@@ -849,9 +869,30 @@ async function streamOpcChat(
   }
 }
 
-const chatModelPayload = (content: string): OpcChatStreamPayload => ({
-  content, provider: 'mimo', model: 'mimo-v2.6-pro', custom: false, base_url: 'https://api.xiaomimimo.com/v1',
-});
+const chatModelPayload = (content: string): OpcChatStreamPayload => {
+  let preset = 'mimo';
+  try { preset = localStorage.getItem('sf_model_preset') ?? 'mimo'; } catch { /* 忽略存储异常 */ }
+  const read = (key: string, fallback: string) => {
+    try { return localStorage.getItem(key)?.trim() || fallback; } catch { return fallback; }
+  };
+  if (preset === 'custom') {
+    const entry = activeCustomEntry();
+    return {
+      content, provider: 'openai', custom: true,
+      model: entry?.model ?? read('sf_custom_model', ''), base_url: entry?.baseUrl ?? read('sf_custom_base_url', ''),
+    };
+  }
+  if (preset === 'deepseek') {
+    return {
+      content, provider: 'deepseek', custom: false,
+      model: read('sf_selected_model', 'deepseek-chat'), base_url: 'https://api.deepseek.com/v1',
+    };
+  }
+  return {
+    content, provider: 'mimo', custom: false,
+    model: read('sf_selected_model', 'mimo-v2.6-pro'), base_url: 'https://api.xiaomimimo.com/v1',
+  };
+};
 
 export const sendOpcChatStream = (
   id: string,

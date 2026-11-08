@@ -37,12 +37,29 @@ function fail(res: Response, error: unknown): void {
   res.status(err.status).json({ error: { code: err.code, message: err.message } });
 }
 
+const MODEL_PROVIDERS = ['mimo', 'deepseek', 'openai'] as const;
+const DEFAULT_BASE_URL: Record<string, string> = {
+  mimo: 'https://api.xiaomimimo.com/v1',
+  deepseek: 'https://api.deepseek.com/v1',
+  openai: 'https://api.openai.com/v1',
+};
+const DEFAULT_MODEL: Record<string, string> = {
+  mimo: 'mimo-v2.6-pro',
+  deepseek: 'deepseek-chat',
+};
+
 export function modelConfig(req: Request): { provider: ProviderId; model?: string; apiKey?: string; baseUrl?: string; toolEnv?: Readonly<Record<string, string>> } {
   const provider = String(req.body?.provider || 'mimo');
-  if (provider !== 'mimo' || !isProviderId(provider)) {
-    throw new OpcChatError(422, 'INVALID_PROVIDER', '当前工作台仅支持 MiMo');
+  if (!isProviderId(provider) || !(MODEL_PROVIDERS as readonly string[]).includes(provider)) {
+    throw new OpcChatError(422, 'INVALID_PROVIDER', '当前支持 MiMo、DeepSeek 或 OpenAI 兼容的自定义模型');
   }
   const header = (name: string) => String(req.headers[name] ?? '').trim();
+  const custom = req.body?.custom === true;
+  const model = String(req.body?.model || '').trim() || DEFAULT_MODEL[provider] || '';
+  const baseUrl = String(req.body?.base_url || '').trim() || DEFAULT_BASE_URL[provider];
+  if (!model) throw new OpcChatError(422, 'INVALID_MODEL', '请选择或填写模型名称');
+  if (!baseUrl) throw new OpcChatError(422, 'INVALID_BASE_URL', '自定义模型必须填写 Base URL');
+  const apiKey = resolveProviderKey(provider, req.headers) || (custom ? header('x-custom-api-key') : '');
   const toolEnv = Object.fromEntries([
     ['TAVILY_API_KEY', header('x-tavily-key')],
     ['SERPAPI_API_KEY', header('x-serpapi-key')],
@@ -50,9 +67,9 @@ export function modelConfig(req: Request): { provider: ProviderId; model?: strin
   ].filter(([, value]) => Boolean(value)));
   return {
     provider,
-    model: 'mimo-v2.6-pro',
-    apiKey: resolveProviderKey(provider, req.headers),
-    baseUrl: 'https://api.xiaomimimo.com/v1',
+    model,
+    apiKey: apiKey || undefined,
+    baseUrl,
     toolEnv,
   };
 }

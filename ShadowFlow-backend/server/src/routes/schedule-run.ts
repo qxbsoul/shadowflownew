@@ -6,6 +6,7 @@ import { OpcChatError, opcChatCompany } from '../services/opc-chat';
 import { executeScheduledTask } from '../services/opc-schedule';
 import { PYTHON_BACKEND_URL } from '../python-backend';
 import { modelConfig } from './opc-chat';
+import { appendOpcMessage, createOpcConversation, getOpcConversation, listOpcMessages } from '../storage/opc-chat';
 import type { ScheduledRunResult } from '../services/opc-schedule';
 
 const router = Router();
@@ -64,6 +65,89 @@ function fail(res: ExpressResponse, error: unknown): void {
   res.status(err.status).json({ error: { code: err.code, message: err.message } });
 }
 
+interface ScheduleDto {
+  schedule_id: string;
+  company_id: string;
+  task_description: string;
+  agent_id?: string | null;
+  enabled?: boolean;
+}
+
+/** 从 Python 读一条属于当前公司的定时任务（Node 不存调度表）。 */
+async function loadSchedule(authorization: string, companyId: string, scheduleId: string): Promise<ScheduleDto> {
+  const listResponse = await fetch(`${PYTHON_BACKEND_URL}/api/schedules`, { headers: { authorization } });
+  if (!listResponse.ok) throw new OpcChatError(502, 'SCHEDULE_LIST_FAILED', '无法读取定时任务列表，请稍后重试');
+  const listed = await listResponse.json() as { data?: ScheduleDto[] };
+  const schedule = (listed.data ?? []).find(item => item.schedule_id === scheduleId && item.company_id === companyId);
+  if (!schedule) throw new OpcChatError(404, 'SCHEDULE_NOT_FOUND', '定时任务不存在或不属于当前公司');
+  if (!schedule.task_description.trim()) throw new OpcChatError(422, 'INVALID_SCHEDULE', '该任务没有描述，无法执行');
+  return schedule;
+}
+
+/**
+ * 立即执行的「流式版」第一步：只建对话，不跑模型。
+ * 前端随后用正常的聊天流接口在这条对话里发消息，从而能看到总经理思考、
+ * 员工流式输出、审批卡片等全部实时状态。
+ */
+router.post('/:scheduleId/start', (req, res) => {
+  void (async () => {
+    const scheduleId = String(req.params.scheduleId || '');
+    if (!/^[A-Za-z0-9_-]+$/.test(scheduleId)) throw new OpcChatError(400, 'INVALID_SCHEDULE_ID', '非法的任务 id');
+    const company = await opcChatCompany(req.headers.authorization || '');
+    const schedule = await loadSchedule(req.headers.authorization || '', company.id, scheduleId);
+    const conversation = createOpcConversation(company.id, 'single', `定时任务｜${schedule.task_description}`.slice(0, 40));
+    res.json({ data: {
+      conversation_id: conversation.id,
+      task_description: schedule.task_description,
+    } });
+  })().catch(error => fail(res, error));
+});
+
+/** 流式执行的收尾：读取这条对话的真实结果，写回运行记录。 */
+router.post('/:scheduleId/finish', (req, res) => {
+  void (async () => {
+    const scheduleId = String(req.params.scheduleId || '');
+    if (!/^[A-Za-z0-9_-]+$/.test(scheduleId)) throw new OpcChatError(400, 'INVALID_SCHEDULE_ID', '非法的任务 id');
+    const authorization = req.headers.authorization || '';
+    const company = await opcChatCompany(authorization);
+    await loadSchedule(authorization, company.id, scheduleId);
+    const conversationId = String(req.body?.conversation_id || '').trim();
+    const conversation = conversationId ? getOpcConversation(conversationId, company.id) : null;
+    if (!conversation) throw new OpcChatError(404, 'CONVERSATION_NOT_FOUND', '执行对话不存在');
+
+    const messages = listOpcMessages(conversation.id);
+    const final = [...messages].reverse().find(message => message.sender_kind === 'ceo'
+      && message.channel !== 'workflow' && !String(message.metadata_json ?? '').includes('"dag"'));
+    let run: ScheduleRunRecord;
+    if (final) {
+      run = {
+        run_id: randomUUID().replace(/-/g, ''),
+        triggered_at: new Date().toISOString(),
+        status: 'succeeded',
+        conversation_id: conversation.id,
+        output_summary: final.content.slice(0, 2000),
+      };
+    } else {
+      const detail = messages.filter(message => message.sender_kind === 'agent' && message.status === 'failed')[0]?.content
+        || '本轮没有产出最终成果';
+      appendOpcMessage(conversation.id, {
+        sender_kind: 'system', sender_name: '总经理', channel: 'workflow', status: 'failed',
+        content: `定时任务执行失败：${detail}`,
+      });
+      run = {
+        run_id: randomUUID().replace(/-/g, ''),
+        triggered_at: new Date().toISOString(),
+        status: 'failed',
+        conversation_id: conversation.id,
+        error: detail.slice(0, 300),
+        output_summary: `定时任务执行失败：${detail}`.slice(0, 2000),
+      };
+    }
+    await appendScheduleRun(scheduleId, run);
+    res.json({ data: run, meta: { streamed: true } });
+  })().catch(error => fail(res, error));
+});
+
 /**
  * 立即执行定时任务。
  *
@@ -107,12 +191,7 @@ router.post('/:scheduleId/run', (req, res) => {
       return;
     }
 
-    const listResponse = await fetch(`${PYTHON_BACKEND_URL}/api/schedules`, { headers: forwarded });
-    if (!listResponse.ok) throw new OpcChatError(502, 'SCHEDULE_LIST_FAILED', '无法读取定时任务列表，请稍后重试');
-    const listed = await listResponse.json() as { data?: Array<{ schedule_id: string; company_id: string; task_description: string; agent_id?: string | null; enabled?: boolean }> };
-    const schedule = (listed.data ?? []).find(item => item.schedule_id === scheduleId && item.company_id === company.id);
-    if (!schedule) throw new OpcChatError(404, 'SCHEDULE_NOT_FOUND', '定时任务不存在或不属于当前公司');
-    if (!schedule.task_description.trim()) throw new OpcChatError(422, 'INVALID_SCHEDULE', '该任务没有描述，无法执行');
+    const schedule = await loadSchedule(authorization, company.id, scheduleId);
 
     const result = await executeScheduledTask({
       companyId: company.id,

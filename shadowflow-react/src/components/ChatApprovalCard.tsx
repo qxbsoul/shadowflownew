@@ -34,7 +34,7 @@ export default function ChatApprovalCard({ approval }: { approval: ChatApproval 
       <div className="chat-approval-heading"><span>老板审批</span><small>{pending ? '此节点与下游正在等待你的选择' : decisionText(current)}</small></div>
       <h4>{current.task_title || '确认后继续执行'}</h4>
       <div className="chat-approval-content">
-        <span>需要审批的内容（总经理下发工单）</span>
+        <span>需要审批的内容</span>
         {current.content
           ? <pre>{current.content}</pre>
           : <p className="chat-approval-content-empty">这条审批没有存下工单内容，只保留了标题与决定结果。</p>}

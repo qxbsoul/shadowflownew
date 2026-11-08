@@ -163,4 +163,53 @@ describe('POST /api/schedules/:id/run', () => {
       .expect(404);
     expect(res.body.error.code).toBe('SCHEDULE_NOT_FOUND');
   });
+
+  it('流式执行：start 建对话，finish 按对话真实结果写运行记录', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/api/opc/auth/me')) return Response.json({ company: { id: 'co1', name: '公司一' } });
+      if (url.endsWith('/api/schedules')) return Response.json({ data: [scheduleRecord] });
+      return Response.json({ items: [] });
+    }));
+    const started = await request(app)
+      .post(`/api/schedules/${scheduleId}/start`)
+      .set('Authorization', 'Bearer co1')
+      .send({})
+      .expect(200);
+    const conversationId = started.body.data.conversation_id;
+    expect(started.body.data.task_description).toBe('生成每日市场简报');
+    const { getOpcConversation, appendOpcMessage } = await import('../storage/opc-chat');
+    expect(getOpcConversation(conversationId, 'co1')?.title).toContain('定时任务');
+
+    appendOpcMessage(conversationId, { sender_kind: 'ceo', sender_name: '总经理', channel: 'chat', content: '简报已完成' });
+    const finished = await request(app)
+      .post(`/api/schedules/${scheduleId}/finish`)
+      .set('Authorization', 'Bearer co1')
+      .send({ conversation_id: conversationId })
+      .expect(200);
+    expect(finished.body.data.status).toBe('succeeded');
+    expect(finished.body.data.output_summary).toContain('简报已完成');
+    const record = JSON.parse(readFileSync(join(schedulesDir, `${scheduleId}.json`), 'utf8'));
+    expect(record.runs[0]).toMatchObject({ status: 'succeeded', conversation_id: conversationId });
+  });
+
+  it('流式执行：没有最终答复时记录 failed', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/api/opc/auth/me')) return Response.json({ company: { id: 'co1', name: '公司一' } });
+      if (url.endsWith('/api/schedules')) return Response.json({ data: [scheduleRecord] });
+      return Response.json({ items: [] });
+    }));
+    const started = await request(app)
+      .post(`/api/schedules/${scheduleId}/start`)
+      .set('Authorization', 'Bearer co1')
+      .send({})
+      .expect(200);
+    const finished = await request(app)
+      .post(`/api/schedules/${scheduleId}/finish`)
+      .set('Authorization', 'Bearer co1')
+      .send({ conversation_id: started.body.data.conversation_id })
+      .expect(200);
+    expect(finished.body.data.status).toBe('failed');
+  });
 });
